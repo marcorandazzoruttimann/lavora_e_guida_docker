@@ -1,0 +1,19 @@
+---
+description: Direttive globali del progetto lavora_e_guida (lingua e stile commenti)
+alwaysApply: true
+---
+
+# Direttive di progetto (sempre)
+
+Valgono per l’intero repo e per ogni agente Cursor che lavora su questo progetto.
+
+## 1. Discussioni solo in italiano
+
+- Chat, plan, spiegazioni, README/docs di progetto e messaggi TTS rivolti all’utente: **solo italiano**.
+- Identificatori di codice (`snake_case`, nomi file, variabili d’ambiente, API pubbliche) restano in **inglese** dove è convenzione tecnica.
+
+## 2. Commenti molto verbosi nel codice
+
+- Commentare la logica **circa ogni 2–3 righe**, in stile didattico: spiegare *perché* e *cosa fa* il blocco successivo.
+- Preferire intenzioni, contratti, side-effect e vincoli (WSL/Host, audio, sicurezza alla guida).
+- Non commentare il banale letterale (es. `i += 1` → “incrementa i”); commentare il contesto utile alla review hands-free.
