@@ -1,0 +1,29 @@
+{
+  "base_url": "http://127.0.0.1:11434",
+  "results": [
+    {
+      "model": "gemma2:2b",
+      "available": true,
+      "cold_latency_s": 108.415,
+      "warm_avg_latency_s": 33.744,
+      "accuracy": 1.0,
+      "correct": 8,
+      "total": 8,
+      "errors": [],
+      "ram_note": "un solo modello caricato alla volta (unload implicito al cambio)"
+    },
+    {
+      "model": "qwen2.5:3b",
+      "available": true,
+      "cold_latency_s": 71.862,
+      "warm_avg_latency_s": 10.589,
+      "accuracy": 1.0,
+      "correct": 8,
+      "total": 8,
+      "errors": [],
+      "ram_note": "un solo modello caricato alla volta (unload implicito al cambio)"
+    }
+  ],
+  "recommendation": "qwen2.5:3b",
+  "note_it": "Aggiornare OLLAMA_MODEL in .env solo dopo review umana. Con WSL a ~5 Gi RAM preferire gemma2:2b se qwen2.5:3b swap-pa."
+}

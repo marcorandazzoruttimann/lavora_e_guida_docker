@@ -12,7 +12,8 @@ from lavora_e_guida.audio.factory import create_audio_pair, create_stt, create_t
 from lavora_e_guida.audio.http_bridge import HttpBridgeSTT, HttpBridgeTTS
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
 from lavora_e_guida.config import Settings
-from lavora_e_guida.main import run_echo_loop
+from lavora_e_guida.main import run_agent_loop
+from lavora_e_guida.routing.intent import IntentClassifier
 
 
 def test_mock_listen_returns_line() -> None:
@@ -39,28 +40,29 @@ def test_mock_speak_writes_prefixed_line() -> None:
     assert out.getvalue() == "[TTS] prova\n"
 
 
-def test_echo_loop_mock_end_to_end() -> None:
-    """Criterio Phase 1: listen → echo → speak senza audio reale."""
+def test_agent_loop_mock_end_to_end_phase1_compat() -> None:
+    """Audio Mock + loop Phase 2 (heuristic): regressione del canale I/O."""
     infile = StringIO("prova echo\nesci\n")
     outfile = StringIO()
     stt = MockSTT(infile=infile, outfile=outfile, prompt="")
     tts = MockTTS(outfile=outfile, prefix="[TTS] ")
-    code = run_echo_loop(stt, tts)
+    code = run_agent_loop(stt, tts, IntentClassifier(llm=None))
     assert code == 0
     spoken = outfile.getvalue()
-    # Introduzione + echo della frase + saluto di chiusura.
+    # Introduzione + stub intent + saluto di chiusura (non più echo puro).
     assert "Pronto." in spoken
+    assert "Intent GENERAL" in spoken
     assert "Hai detto: prova echo" in spoken
     assert "Arrivederci." in spoken
 
 
-def test_echo_loop_empty_input_exits() -> None:
+def test_agent_loop_empty_input_exits() -> None:
     """Enter a vuoto / transcript blank → uscita senza crash."""
     infile = StringIO("   \n")
     outfile = StringIO()
     stt = MockSTT(infile=infile, outfile=outfile, prompt="")
     tts = MockTTS(outfile=outfile)
-    assert run_echo_loop(stt, tts) == 0
+    assert run_agent_loop(stt, tts, IntentClassifier(llm=None)) == 0
     assert "Nessun input" in outfile.getvalue()
 
 
