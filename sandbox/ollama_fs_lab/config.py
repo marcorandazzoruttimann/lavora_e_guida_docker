@@ -10,6 +10,7 @@ from pathlib import Path
 
 # Root FS del lab: cartella Desktop Windows montata in WSL.
 # Tutto ciò che è fuori da qui deve essere rifiutato (path traversal).
+# Al primo avvio `ensure_workspace()` crea anche notes/ e inbox/ sotto questo root.
 WORKSPACE_ROOT = Path("/mnt/c/Users/User/Desktop/Ollama_test")
 
 # Daemon verificato in Step 0: Ollama gira in WSL su loopback, non sull'host Windows.

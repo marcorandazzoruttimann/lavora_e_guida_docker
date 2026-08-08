@@ -44,6 +44,7 @@ Se il ping fallisce: avviare il daemon in WSL con `ollama serve` (non confondere
 
 MockSTT (stdin) → `LocalOllama.chat` (`qwen2.5:3b`) → MockTTS (`[TTS] …`).
 Niente tool FS: solo conversazione multi-turno in italiano.
+*(Il loop attuale include già lo Step 2; per chat pura basta non chiedere file.)*
 
 ```bash
 # dalla root del repo (venv attivo consigliato)
@@ -62,18 +63,49 @@ printf 'Ciao, rispondi in una frase.\nesci\n' | PYTHONPATH=src:. python -m sandb
 
 
 
+## Step 2 — `create_text_file` sul Desktop
+
+Tool JSON eseguito in Python (niente function-calling Ollama nativo):
+
+- Schema: `{"tool":"create_text_file","args":{"name":"…","content":"…"}}` oppure `{"tool":"none","reply":"…"}`.
+- Root: solo `Ollama_test` sul Desktop; path assoluti / `..` → errore parlante.
+- All’avvio: `ensure_workspace()` crea `notes/` e `inbox/` se mancano.
+
+Prompt di prova:
+
+> Crea un file chiamato spesa.txt con la lista latte e pane
+
+```bash
+printf 'Crea un file chiamato spesa.txt con la lista latte e pane\nesci\n' \
+  | PYTHONPATH=src:. python -m sandbox.ollama_fs_lab
+```
+
+**Done**: file in `C:\Users\User\Desktop\Ollama_test\spesa.txt`; conferma su `[TTS] …`.
+
+Verifica diretta del tool (senza LLM):
+
+```bash
+PYTHONPATH=src:. python -c "
+from sandbox.ollama_fs_lab.tools_fs import create_text_file, ensure_workspace
+ensure_workspace()
+print(create_text_file('spesa.txt', 'latte\\npane'))
+"
+```
+
+
+
 ## Checklist step
 
 
-| Step | Descrizione              | OK/KO  | Latenza             | Note qwen / errori tipici                     |
-| ---- | ------------------------ | ------ | ------------------- | --------------------------------------------- |
-| 0    | Daemon + `qwen2.5:3b`    | **OK** | —                   | Daemon **WSL**; Host Windows non espone 11434 |
-| 1    | Loop mock chat (no tool) | ok     | da 50 a 120 secondi | molto lento                                   |
-| 2    | `create_text_file`       |        |                     |                                               |
-| 3    | `append_note`            |        |                     |                                               |
-| 4    | `read_text_file` → TTS   |        |                     |                                               |
-| 5    | Riassunto da read        |        |                     |                                               |
-| 6    | `read_pdf` (inbox/)      |        |                     |                                               |
+| Step | Descrizione              | OK/KO  | Latenza             | Note qwen / errori tipici                                          |
+| ---- | ------------------------ | ------ | ------------------- | ------------------------------------------------------------------ |
+| 0    | Daemon + `qwen2.5:3b`    | **OK** | —                   | Daemon **WSL**; Host Windows non espone 11434                      |
+| 1    | Loop mock chat (no tool) | ok     | da 50 a 120 secondi | molto lento                                                        |
+| 2    | `create_text_file`       | ok     | 25-30 secondi       | le latenze chat sono doppie per ogni richiesta. tipo 12+14 o 14+16 |
+| 3    | `append_note`            |        |                     |                                                                    |
+| 4    | `read_text_file` → TTS   |        |                     |                                                                    |
+| 5    | Riassunto da read        |        |                     |                                                                    |
+| 6    | `read_pdf` (inbox/)      |        |                     |                                                                    |
 
 
 Compilare le righe 1–6 a mano dopo ogni validazione: questa tabella decide se il Direct Path del Master può affidarsi a qwen per FS reale.
