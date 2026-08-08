@@ -122,6 +122,7 @@ class LocalOllama:
         format_json: bool = False,
         options: dict[str, Any] | None = None,
     ) -> str:
+    #qui avviene interazione con Ollama: request e response via http locale
         """Chat non-stream; stesso contratto di `generate` sul campo `message.content`."""
         body: dict[str, Any] = {
             "model": self.model,

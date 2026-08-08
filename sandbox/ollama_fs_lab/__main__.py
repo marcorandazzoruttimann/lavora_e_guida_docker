@@ -1,6 +1,6 @@
 """Entry: `PYTHONPATH=src:. python -m sandbox.ollama_fs_lab`.
 
-Avvia il loop MockSTT/TTS + Ollama con tool `create_text_file` (Step 2).
+Avvia il loop MockSTT/TTS + Ollama con create_text_file + append_note (Step 3).
 """
 
 from __future__ import annotations
@@ -58,10 +58,10 @@ def main() -> None:
         stt = MockSTT(prompt="Tu (mock STT)> ")
         tts = MockTTS(prefix="[TTS] ")
 
-        # Banner: modello, URL e dove finiscono i .txt creati.
+        # Banner: modello, URL e tool FS attivi (create + append note).
         print(
             f"[lab] modello={OLLAMA_MODEL} url={OLLAMA_URL} "
-            f"workspace={root} tool=create_text_file",
+            f"workspace={root} tools=create_text_file,append_note",
             file=sys.stderr,
         )
         code = run_chat_loop(stt, tts, llm)

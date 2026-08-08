@@ -1,6 +1,6 @@
 """Tool filesystem del lab: solo sotto WORKSPACE_ROOT (Desktop Ollama_test).
 
-Step 2 espone `create_text_file`; append/read/list arriveranno negli step 3–4.
+Step 2: `create_text_file`; Step 3: `append_note` (notes/); read/list nello Step 4.
 Ogni path utente è risolto e verificato: fuori dal root → errore parlante, niente I/O.
 """
 
@@ -99,4 +99,61 @@ def create_text_file(name: str, content: str) -> str:
     return (
         f"OK: creato file {rel.as_posix()} "
         f"({len(text)} caratteri) nel workspace Ollama_test."
+    )
+
+
+def _note_target_name(name: str) -> str:
+    """Mappa un nome nota sul path relativo sotto notes/ se manca una cartella.
+
+    Contratto Step 3: `spesa.txt` → `notes/spesa.txt`; `notes/x.txt` resta così.
+    Path con `..` / assoluti restano al caller (`resolve_in_workspace`).
+    """
+    # Normalizziamo subito: spazi→_ e strip, coerente con create_text_file.
+    cleaned = normalize_fs_name(name)
+    if not cleaned:
+        return cleaned
+    # Se c'è già un separatore, l'utente ha scelto la cartella (es. notes/ o root).
+    candidate = Path(cleaned)
+    if len(candidate.parts) > 1:
+        return cleaned
+    # Solo basename: destinazione naturale delle note = notes/ (creata da ensure).
+    return f"notes/{cleaned}"
+
+
+def append_note(name: str, text: str) -> str:
+    """Appende testo UTF-8 a una nota (crea il file se non esiste).
+
+    Side-effect: scrive sotto WORKSPACE_ROOT (di solito `notes/…`).
+    Se il file esiste e non termina con newline, ne aggiungiamo una prima
+    del pezzo nuovo così due append consecutive restano leggibili su Windows.
+    """
+    # text None → stringa vuota: append no-op ma file creato se mancava.
+    chunk = "" if text is None else str(text)
+
+    # Bare name → notes/; path con cartella → invariato (sempre via resolve sicuro).
+    target = resolve_in_workspace(_note_target_name(name))
+
+    # mkdir genitori: notes/ può già esserci; serve se name era notes/sub/….
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # Esisteva già? Serve per il messaggio e per decidere il separatore newline.
+    existed = target.is_file()
+    if existed:
+        # Lettura minima: solo ultimo byte (se c'è) per sapere se manca `\n`.
+        previous = target.read_text(encoding="utf-8")
+        # Separatore solo se c'è contenuto precedente senza newline finale.
+        prefix = "" if (not previous or previous.endswith("\n")) else "\n"
+        # append mode: non sovrascriviamo create_text_file / append precedenti.
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(prefix + chunk)
+        action = "aggiornata"
+    else:
+        # Prima scrittura: equivalente a create sotto notes/, senza overwrite.
+        target.write_text(chunk, encoding="utf-8")
+        action = "creata"
+
+    rel = target.relative_to(WORKSPACE_ROOT.resolve())
+    return (
+        f"OK: nota {action} {rel.as_posix()} "
+        f"(+{len(chunk)} caratteri) nel workspace Ollama_test."
     )

@@ -94,18 +94,54 @@ print(create_text_file('spesa.txt', 'latte\\npane'))
 
 
 
+## Step 3 — `append_note` (aggiornamento note)
+
+Tool JSON per aggiungere testo a una nota sotto `notes/` (crea il file se manca):
+
+- Schema: `{"tool":"append_note","args":{"name":"…","text":"…"}}` oppure `{"tool":"none","reply":"…"}`.
+- Nome senza cartella (es. `spesa.txt`) → `notes/spesa.txt`; path con cartella resta relativo al root.
+- Append: se il file esiste e non termina con newline, ne viene aggiunta una prima del pezzo nuovo.
+- Restano attivi anche `create_text_file` e `tool=none`.
+
+Prompt di prova:
+
+> Aggiungi alla nota spesa.txt la riga uova
+
+```bash
+printf 'Aggiungi alla nota spesa.txt la riga uova\nesci\n' \
+  | PYTHONPATH=src:. python -m sandbox.ollama_fs_lab
+```
+
+**Done**: `notes/spesa.txt` aggiornato su Desktop; conferma su `[TTS] …`; riaprire il file su Windows e verificare l’append.
+
+Verifica diretta del tool (senza LLM, due append consecutive):
+
+```bash
+PYTHONPATH=src:. python -c "
+from pathlib import Path
+from sandbox.ollama_fs_lab.config import WORKSPACE_ROOT
+from sandbox.ollama_fs_lab.tools_fs import append_note, ensure_workspace
+ensure_workspace()
+print(append_note('spesa.txt', 'latte\\npane'))
+print(append_note('spesa.txt', 'uova'))
+print((WORKSPACE_ROOT / 'notes' / 'spesa.txt').read_text(encoding='utf-8'))
+"
+```
+
+
+
 ## Checklist step
 
 
-| Step | Descrizione              | OK/KO  | Latenza             | Note qwen / errori tipici                                          |
-| ---- | ------------------------ | ------ | ------------------- | ------------------------------------------------------------------ |
-| 0    | Daemon + `qwen2.5:3b`    | **OK** | —                   | Daemon **WSL**; Host Windows non espone 11434                      |
-| 1    | Loop mock chat (no tool) | ok     | da 50 a 120 secondi | molto lento                                                        |
-| 2    | `create_text_file`       | ok     | 25-30 secondi       | le latenze chat sono doppie per ogni richiesta. tipo 12+14 o 14+16 |
-| 3    | `append_note`            |        |                     |                                                                    |
-| 4    | `read_text_file` → TTS   |        |                     |                                                                    |
-| 5    | Riassunto da read        |        |                     |                                                                    |
-| 6    | `read_pdf` (inbox/)      |        |                     |                                                                    |
+| Step | Descrizione              | OK/KO  | Latenza             | Note qwen / errori tipici                                                                              |
+| ---- | ------------------------ | ------ | ------------------- | ------------------------------------------------------------------------------------------------------ |
+| 0    | Daemon + `qwen2.5:3b`    | **OK** | —                   | Daemon **WSL**; Host Windows non espone 11434                                                          |
+| 1    | Loop mock chat (no tool) | ok     | da 50 a 120 secondi | molto lento                                                                                            |
+| 2    | `create_text_file`       | ok     | 25-30 secondi       | le latenze chat sono doppie per ogni richiesta. tipo 12+14 o 14+16                                     |
+| 3    | `append_note`            | ok     | 25-30 secondi       | se gli dici di aggiornare "l'ultimo file" si ricorda il nome ma ne crea uno nuovo nella cartella notes |
+| 4    | `read_text_file` → TTS   |        |                     |                                                                                                        |
+| 5    | Riassunto da read        |        |                     |                                                                                                        |
+| 6    | `read_pdf` (inbox/)      |        |                     |                                                                                                        |
 
 
 Compilare le righe 1–6 a mano dopo ogni validazione: questa tabella decide se il Direct Path del Master può affidarsi a qwen per FS reale.
