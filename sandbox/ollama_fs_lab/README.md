@@ -130,6 +130,41 @@ print((WORKSPACE_ROOT / 'notes' / 'spesa.txt').read_text(encoding='utf-8'))
 
 
 
+## Step 4 — `read_text_file` → MockTTS
+
+Tool JSON per rileggere un file e far stampare il contenuto via MockTTS:
+
+- Schema: `{"tool":"read_text_file","args":{"name":"…"}}` oppure `{"tool":"none","reply":"…"}`.
+- Path relativo al root; se il bare name manca in root, si prova `notes/<name>` (coerenza Step 3).
+- Dopo la lettura il modello deve rispondere con `tool=none` ripetendo il contenuto a voce → `[TTS] …`.
+- Restano attivi anche `create_text_file` e `append_note`.
+
+Prompt di prova:
+
+> Leggi spesa.txt
+
+```bash
+printf 'Leggi spesa.txt\nesci\n' \
+  | PYTHONPATH=src:. python -m sandbox.ollama_fs_lab
+```
+
+**Done**: stdout `[TTS]` con il contenuto corretto del file (root o `notes/`).
+
+Verifica diretta del tool (senza LLM):
+
+```bash
+PYTHONPATH=src:. python -c "
+from sandbox.ollama_fs_lab.tools_fs import (
+    create_text_file, ensure_workspace, read_text_file,
+)
+ensure_workspace()
+print(create_text_file('spesa.txt', 'latte\\npane'))
+print(read_text_file('spesa.txt'))
+"
+```
+
+
+
 ## Checklist step
 
 

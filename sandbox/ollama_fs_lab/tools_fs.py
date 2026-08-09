@@ -1,6 +1,8 @@
 """Tool filesystem del lab: solo sotto WORKSPACE_ROOT (Desktop Ollama_test).
 
-Step 2: `create_text_file`; Step 3: `append_note` (notes/); read/list nello Step 4.
+Step 2: `create_text_file` (default `.txt` se manca l'estensione);
+Step 3: `append_note` (notes/);
+Step 4: `read_text_file` — risoluzione deterministica estensioni + notes/.
 Ogni path utente è risolto e verificato: fuori dal root → errore parlante, niente I/O.
 """
 
@@ -38,6 +40,22 @@ def normalize_fs_name(name: str) -> str:
     cleaned = (name or "").strip()
     # Ogni spazio → `_` anche nei segmenti di cartella (es. `note varie/a b.txt`).
     return cleaned.replace(" ", "_")
+
+
+# Default in creazione: senza suffix → `.txt` (Python decide, non qwen).
+_DEFAULT_TEXT_EXT = ".txt"
+
+
+def with_default_text_ext(cleaned: str) -> str:
+    """Se il path relativo non ha estensione, appende `.txt`.
+
+    Contratto create: `spesa` → `spesa.txt`; `notes/lista` → `notes/lista.txt`.
+    Con suffix già presente → invariato.
+    """
+    # Path.suffix vuoto = nessuna estensione nel basename.
+    if Path(cleaned).suffix:
+        return cleaned
+    return f"{cleaned}{_DEFAULT_TEXT_EXT}"
 
 
 def resolve_in_workspace(name: str) -> Path:
@@ -81,12 +99,17 @@ def create_text_file(name: str, content: str) -> str:
 
     Ritorna una stringa di esito per il modello (non solleva se I/O ok).
     Side-effect: scrive sul Desktop; crea le directory genitore se mancano.
+    Senza estensione nel name → default `.txt` (es. `spesa` → `spesa.txt`).
     """
     # content None → stringa vuota: meglio un file vuoto che crash sul tipo.
     text = "" if content is None else str(content)
 
+    # Normalizziamo + default .txt PRIMA della resolve: un solo path canonico.
+    cleaned = normalize_fs_name(name)
+    if not cleaned:
+        raise FsToolError("nome file vuoto: indica un nome relativo al workspace.")
     # Risoluzione sicura: qui falliscono traversal / assoluti (FsToolError).
-    target = resolve_in_workspace(name)
+    target = resolve_in_workspace(with_default_text_ext(cleaned))
 
     # mkdir genitori: consente `notes/foo.txt` senza richiedere mkdir esplicito.
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -157,3 +180,96 @@ def append_note(name: str, text: str) -> str:
         f"OK: nota {action} {rel.as_posix()} "
         f"(+{len(chunk)} caratteri) nel workspace Ollama_test."
     )
+
+
+# Estensioni provate in lettura se l'LLM omette il suffix (ordine fisso, Python decide).
+_READ_EXTENSIONS: tuple[str, ...] = (".txt", ".docx", ".pdf", ".md", ".json")
+
+
+def _read_name_variants(cleaned: str) -> list[str]:
+    """Espande un nome relativo nelle varianti da cercare su disco.
+
+    Con suffix già presente → un solo candidato. Senza → stem + ogni estensione
+    in `_READ_EXTENSIONS` (es. `spesa` → spesa.txt, spesa.docx, …).
+    Path con cartella (es. `notes/spesa`) ricevono l'estensione solo sul basename.
+    """
+    candidate = Path(cleaned)
+    # L'LLM ha già scelto il tipo: niente tentativi extra.
+    if candidate.suffix:
+        return [cleaned]
+
+    stem = candidate.name
+    parent = candidate.parent
+    parent_posix = parent.as_posix()
+    variants: list[str] = []
+    for ext in _READ_EXTENSIONS:
+        # parent == '.' → bare in root; altrimenti notes/spesa + ext.
+        if parent_posix in (".", ""):
+            variants.append(f"{stem}{ext}")
+        else:
+            variants.append(f"{parent_posix}/{stem}{ext}")
+    return variants
+
+
+def _resolve_readable_target(name: str) -> Path:
+    """Risolve in modo deterministico il file da leggere (estensioni + notes/).
+
+    Per ogni variante: prima root workspace, poi `notes/` se il nome è bare.
+    Path già sotto notes/ o con cartella non vengono riprefissati.
+    L'LLM non deve ritentare path: qui Python esaurisce le combinazioni.
+    """
+    cleaned = normalize_fs_name(name)
+    if not cleaned:
+        raise FsToolError("nome file vuoto: indica un nome relativo al workspace.")
+
+    tried: list[str] = []
+    for rel in _read_name_variants(cleaned):
+        # 1) Root (o path già relativo, es. notes/x.txt passato dall'LLM).
+        target = resolve_in_workspace(rel)
+        tried.append(rel)
+        if target.is_file():
+            return target
+
+        # 2) Fallback notes/ solo per bare name (un segmento): dove scrive append_note.
+        if len(Path(rel).parts) == 1:
+            notes_rel = f"notes/{rel}"
+            notes_target = resolve_in_workspace(notes_rel)
+            tried.append(notes_rel)
+            if notes_target.is_file():
+                return notes_target
+
+    display = (name or "").strip() or cleaned
+    exts = ", ".join(_READ_EXTENSIONS)
+    raise FsToolError(
+        f"ERRORE: File '{display}' non trovato nel workspace né in notes/ "
+        f"(estensioni provate: {exts})."
+    )
+
+
+def read_text_file(name: str) -> str:
+    """Legge un file di testo UTF-8 sotto WORKSPACE_ROOT e ne restituisce il contenuto.
+
+    Ritorna una stringa di esito per il modello (prefisso OK + corpo).
+    Side-effect: nessuno in scrittura. Path/estensioni risolti in Python
+    (vedi `_resolve_readable_target`); file assente → FsToolError parlante.
+    """
+    # Risoluzione + esistenza: qui falliscono path illegali / file mancanti.
+    target = _resolve_readable_target(name)
+
+    # UTF-8: stesso encoding di create/append; .docx/.pdf binari → errore chiaro.
+    try:
+        text = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        rel = target.relative_to(WORKSPACE_ROOT.resolve()).as_posix()
+        raise FsToolError(
+            f"file {rel!r} trovato ma non leggibile come testo UTF-8."
+        ) from exc
+
+    # Path relativo: il modello lo cita in TTS senza esporre /mnt/c/….
+    rel = target.relative_to(WORKSPACE_ROOT.resolve())
+    # Corpo dopo il marker: l'agente lo rilegge a voce (Step 4 Done).
+    return (
+        f"OK: contenuto di {rel.as_posix()} "
+        f"({len(text)} caratteri):\n{text}"
+    )
+

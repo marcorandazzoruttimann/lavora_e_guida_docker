@@ -1,8 +1,8 @@
 """Loop singolo agente: MockSTT → LocalOllama (JSON tool) → FsTools → MockTTS.
 
-Step 2–3: il modello può chiamare `create_text_file` e `append_note` sul
-workspace Desktop. Schema JSON stretto (format=json + extract) perché i 3B
-sbagliano facilmente con tool nativi Ollama troppo aperti.
+Step 2–4: il modello può chiamare `create_text_file`, `append_note` e
+`read_text_file` sul workspace Desktop. Schema JSON stretto (format=json +
+extract) perché i 3B sbagliano facilmente con tool nativi Ollama troppo aperti.
 """
 
 from __future__ import annotations
@@ -14,10 +14,15 @@ from lavora_e_guida.audio.interface import BaseSTT, BaseTTS
 from lavora_e_guida.llm.local_ollama import LocalOllama, OllamaError
 
 from sandbox.ollama_fs_lab.config import OLLAMA_MODEL, OLLAMA_URL
-from sandbox.ollama_fs_lab.tools_fs import FsToolError, append_note, create_text_file
+from sandbox.ollama_fs_lab.tools_fs import (
+    FsToolError,
+    append_note,
+    create_text_file,
+    read_text_file,
+)
 
 # Prompt corto + schema fisso: i 3B seguono meglio poche forme che enum lunghi.
-# create_text_file + append_note; read arriverà nello Step 4.
+# create + append + read; PDF nello Step 6.
 _SYSTEM_PROMPT = (
     "Sei un assistente vocale in italiano per un laboratorio FS. "
     "Rispondi SEMPRE e SOLO con un oggetto JSON in uno di questi formati:\n"
@@ -25,20 +30,31 @@ _SYSTEM_PROMPT = (
     '"content":"<testo>"}}\n'
     '2) Aggiorna nota: {"tool":"append_note","args":{"name":"<relativo>",'
     '"text":"<testo da aggiungere>"}}\n'
-    '3) Risposta parlata: {"tool":"none","reply":"<testo italiano breve>"}\n'
+    '3) Leggi file: {"tool":"read_text_file","args":{"name":"<relativo>"}}\n'
+    '4) Risposta parlata: {"tool":"none","reply":"<testo italiano breve>"}\n'
     "Regole: name è relativo al workspace (es. spesa.txt o notes/lista.txt), "
     "mai path assoluti né '..'. Per append_note un nome senza cartella finisce "
-    "in notes/. Dopo un esito tool, conferma all'utente con tool=none. "
-    "Niente markdown, niente testo fuori dal JSON."
+    "in notes/. Per read_text_file, se il bare name manca in root si cerca in "
+    "notes/. Dopo create/append, conferma con tool=none. Dopo read_text_file, "
+    "ripeti a voce il contenuto del file (o le parti richieste) con tool=none. "
+    "REGOLE TASSATIVE:"
+    "- Niente markdown (no ```json), nessun testo o spiegazione fuori dal JSON."
+    "- Se ricevi l'Esito di un tool 'read_text_file' con stato OK, il tuo prossimo"
+    "turno DEVE essere un JSON con tool=none e in reply devi riportare"
+    "il contenuto letto per l'utente."
+    "- Se ricevi un Esito di un tool con stato ERRORE,"
+    "il tuo prossimo turno DEVE essere un JSON con tool=none avvisando brevemente"
+    "l'utente che il file non esiste. NON riprovare lo stesso comando."
 )
 
 # Comandi di uscita case-insensitive: allineati al main Phase 2 del progetto.
 _EXIT_WORDS = frozenset({"esci", "exit", "quit"})
 
-# Whitelist tool Step 2–3: qualunque altro nome → errore parlante (anti-invenzione).
+# Whitelist tool Step 2–4: qualunque altro nome → errore parlante (anti-invenzione).
 _TOOL_CREATE = "create_text_file"
 _TOOL_APPEND = "append_note"
-_ALLOWED_TOOLS = frozenset({_TOOL_CREATE, _TOOL_APPEND})
+_TOOL_READ = "read_text_file"
+_ALLOWED_TOOLS = frozenset({_TOOL_CREATE, _TOOL_APPEND, _TOOL_READ})
 
 # Limite round tool per turno utente: evita loop infinito se il modello ripete.
 _MAX_TOOL_ROUNDS = 4
@@ -82,16 +98,33 @@ def _dispatch_tool(tool: str, args: dict[str, Any]) -> str:
             content = args.get("content", "")
             return create_text_file(name, "" if content is None else str(content))
 
+        if tool == _TOOL_READ:
+            # Solo name: la lettura non ha body; path risolto in tools_fs.
+            return read_text_file(name)
+
         # append_note: il campo canonicamente è `text`; alcuni 3B riusano content.
         text = args.get("text", args.get("content", ""))
         return append_note(name, "" if text is None else str(text))
     except FsToolError as exc:
-        # Path traversal / assoluti: messaggio già in italiano, pronto per TTS.
+        # Path traversal / assoluti / file assente: messaggio già in italiano.
         return f"ERRORE: {exc}"
     except OSError as exc:
         # Disco pieno / permessi WSL→Windows: non propaghiamo stacktrace.
         return f"ERRORE I/O durante operazione file: {exc}"
 
+
+def _followup_after_tool(tool: str, result: str) -> str:
+    """Messaggio user dopo l'esecuzione di un tool.
+    
+    Fornisce solo i dati dell'esito senza template o suggerimenti di formattazione,
+    evitando che l'LLM ricopi i placeholder nel campo reply.
+    """
+    if tool == _TOOL_READ:
+        # Se il result contiene già l'esito (OK/ERRORE) e il contenuto del file:
+        return f"Esito tool {tool}: {result}"
+    
+    # Per le operazioni di scrittura (create/append)
+    return f"Esito tool {tool}: {result}"
 
 def _parse_agent_json(raw: str) -> dict[str, Any]:
     """Estrae oggetto JSON da risposta modello (anche con rumore intorno)."""
@@ -104,7 +137,8 @@ def _json_schema_hint() -> str:
         "JSON non valido. Rispondi SOLO con "
         '{"tool":"none","reply":"..."} oppure '
         '{"tool":"create_text_file","args":{"name":"...","content":"..."}} '
-        'oppure {"tool":"append_note","args":{"name":"...","text":"..."}}.'
+        'oppure {"tool":"append_note","args":{"name":"...","text":"..."}} '
+        'oppure {"tool":"read_text_file","args":{"name":"..."}}.'
     )
 
 
@@ -121,17 +155,17 @@ def run_chat_loop(
     """Un turno = listen → (tool JSON)* → reply TTS; ritorna 0 in uscita normale.
 
     Side-effect: storia conversazione append-only; FS se il modello chiama
-    create_text_file / append_note; TTS stampa ogni reply finale.
+    create/append/read; TTS stampa ogni reply finale (anche il testo letto).
     """
     # Messaggi Ollama: il system resta fisso in testa per tutto il loop.
     messages: list[dict[str, str]] = [
         {"role": "system", "content": _SYSTEM_PROMPT},
     ]
 
-    # Introduzione parlata: conferma Step 3 (create + append note attivi).
+    # Introduzione parlata: conferma Step 4 (create + append + read attivi).
     tts.speak(
-        "Lab Ollama FS, step tre: posso creare file e aggiornare note sul Desktop. "
-        "Di' esci per terminare."
+        "Lab Ollama FS, step quattro: posso creare, aggiornare e leggere file "
+        "sul Desktop. Di' esci per terminare."
     )
 
     turns = 0
@@ -236,10 +270,7 @@ def run_chat_loop(
             messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        f"Esito tool {tool}: {result}. "
-                        'Ora rispondi con {"tool":"none","reply":"conferma breve"}.'
-                    ),
+                    "content": _followup_after_tool(tool, result),
                 }
             )
 
