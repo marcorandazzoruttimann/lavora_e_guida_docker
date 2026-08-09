@@ -174,7 +174,7 @@ print(read_text_file('spesa.txt'))
 | 1    | Loop mock chat (no tool) | ok     | da 50 a 120 secondi | molto lento                                                                                            |
 | 2    | `create_text_file`       | ok     | 25-30 secondi       | le latenze chat sono doppie per ogni richiesta. tipo 12+14 o 14+16                                     |
 | 3    | `append_note`            | ok     | 25-30 secondi       | se gli dici di aggiornare "l'ultimo file" si ricorda il nome ma ne crea uno nuovo nella cartella notes |
-| 4    | `read_text_file` → TTS   |        |                     |                                                                                                        |
+| 4    | `read_text_file` → TTS   | ok     | 20 secondi          | sembra ok                                                                                              |
 | 5    | Riassunto da read        |        |                     |                                                                                                        |
 | 6    | `read_pdf` (inbox/)      |        |                     |                                                                                                        |
 
