@@ -16,6 +16,7 @@ from rapidfuzz import fuzz, process
 
 # Stopword di comando/STT italiano: rumore da togliere prima del match sullo stem.
 # Ordine lungo→corto nelle frasi multi-token gestito a parte (estensioni pronunciate).
+# Include verbi di lettura e di append_note (“aggiungi/aggiorna … spesa”).
 _STOPWORDS: frozenset[str] = frozenset(
     {
         "leggimi",
@@ -25,6 +26,13 @@ _STOPWORDS: frozenset[str] = frozenset(
         "trova",
         "mostrami",
         "mostra",
+        # Comandi tipici append_note: nome tool “sporco” senza il pezzo da scrivere.
+        "aggiungi",
+        "aggiungimi",
+        "aggiorna",
+        "aggiornami",
+        "appendi",
+        "inserisci",
         "il",
         "lo",
         "la",
