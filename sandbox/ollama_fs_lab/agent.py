@@ -24,24 +24,19 @@ from sandbox.ollama_fs_lab.tools_pdf import read_pdf
 
 # Prompt corto + schema fisso: i 3B seguono meglio poche forme che enum lunghi.
 # create + append + read testo + read_pdf (Step 6).
-# Path/estensioni: Python risolve (RapidFuzz); l'LLM non deve indovinare cartelle.
+# L'LLM è agnostico sul path resolve: passa solo name/content; Python decide il file.
 _SYSTEM_PROMPT = (
     "Sei un assistente vocale in italiano per un laboratorio FS. "
     "Rispondi SEMPRE e SOLO con un oggetto JSON in uno di questi formati:\n"
-    '1) Crea file: {"tool":"create_text_file","args":{"name":"<relativo>",'
+    '1) Crea file: {"tool":"create_text_file","args":{"name":"<nome>",'
     '"content":"<testo>"}}\n'
     '2) Aggiorna nota: {"tool":"append_note","args":{"name":"<nome>",'
     '"text":"<testo da aggiungere>"}}\n'
     '3) Leggi file testo: {"tool":"read_text_file","args":{"name":"<nome>"}}\n'
     '4) Leggi PDF: {"tool":"read_pdf","args":{"name":"<nome>"}}\n'
     '5) Risposta parlata: {"tool":"none","reply":"<testo italiano breve>"}\n'
-    "Regole: per create_text_file, name è relativo al workspace "
-    "(es. spesa.txt o notes/lista.txt), mai path assoluti né '..'. "
-    "Per append_note, read_text_file e read_pdf passa solo il nome dal comando "
-    "vocale, anche sporco o senza path/estensione (es. spesa, verbale, "
-    "'leggimi spesa punto txt'): Python risolve il file reale. "
-    "Non inventare cartelle (notes/, inbox/) né estensioni. "
-    "Se append_note non trova il file, Python crea notes/<stem>.txt. "
+    "Regole: in args.name usa il nome del file indicato dall'utente "
+    "(niente path assoluti né '..'). "
     "Dopo create/append, conferma con tool=none. Dopo read_text_file o "
     "read_pdf, rispondi con tool=none: ripeti il contenuto, rispondi alla "
     "domanda dell'utente, oppure riassumi in italiano come richiesto. "
