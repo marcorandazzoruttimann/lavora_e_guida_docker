@@ -5,6 +5,10 @@ Da una traccia STT / nome tool (“leggimi spesa punto txt”) restituisce il
 
 Contratto: nessun I/O di scrittura; solo `rglob` in lettura. I tool chiamanti
 fanno poi `(workspace_dir / rel).resolve()` + check `relative_to`.
+
+Numeri: STT e basename vengono canonizzati così
+`progetto 03` / `progetto_03` / `progetto-03` / `progetto zero tre` /
+`progetto zero3` collassano sulla stessa chiave (`progetto_3`).
 """
 
 from __future__ import annotations
@@ -67,12 +71,53 @@ _KNOWN_SUFFIXES: frozenset[str] = frozenset(
     {".txt", ".md", ".json", ".pdf", ".docx", ".doc", ".csv"}
 )
 
+# Parole-numero italiane → intero (STT “zero tre” / “venti tre” ↔ cifre sul FS).
+# Copre 0–20, decine e cento: abbastanza per nomi tipo progetto_03 / verbale_12.
+_IT_NUMBER_WORDS: dict[str, int] = {
+    "zero": 0,
+    "uno": 1,
+    "una": 1,
+    "due": 2,
+    "tre": 3,
+    "quattro": 4,
+    "cinque": 5,
+    "sei": 6,
+    "sette": 7,
+    "otto": 8,
+    "nove": 9,
+    "dieci": 10,
+    "undici": 11,
+    "dodici": 12,
+    "tredici": 13,
+    "quattordici": 14,
+    "quindici": 15,
+    "sedici": 16,
+    "diciassette": 17,
+    "diciotto": 18,
+    "diciannove": 19,
+    "venti": 20,
+    "trenta": 30,
+    "quaranta": 40,
+    "cinquanta": 50,
+    "sessanta": 60,
+    "settanta": 70,
+    "ottanta": 80,
+    "novanta": 90,
+    "cento": 100,
+}
+
+# Decine “pure” (20, 30, …): unite all’unità successiva (“venti tre” → 23).
+_IT_TENS: frozenset[int] = frozenset({20, 30, 40, 50, 60, 70, 80, 90})
+
+# Spezza token misti lettera/cifra: `zero3` → zero + 3; `progetto03` → progetto + 03.
+_ALNUM_CHUNK = re.compile(r"[a-zàèéìòù]+|\d+", re.IGNORECASE)
+
 
 def _normalize_stem_key(raw: str) -> str:
-    """Canonizza uno stem per la mappa: lower, spazi/trattini → `_`.
+    """Canonizza separatorivarianti: lower, spazi/trattini → `_`.
 
     Coerente con `normalize_fs_name` (spazi→`_`) più lower e trattini,
-    così STT e basename disco condividono la stessa chiave.
+    così STT e basename disco condividono la stessa chiave base.
     """
     # Strip + lower: confronti case-insensitive senza dipendere dal FS.
     s = (raw or "").strip().lower()
@@ -84,11 +129,111 @@ def _normalize_stem_key(raw: str) -> str:
     return s.strip("_")
 
 
+def _split_alnum_chunks(token: str) -> list[str]:
+    """Spezza un token in pezzi solo-lettere o solo-cifre (lower).
+
+    Esempi: `zero3` → [`zero`,`3`]; `03` → [`03`]; `progetto` → [`progetto`].
+    """
+    if not token:
+        return []
+    # findall: ignora eventuali simboli residui tra pezzi.
+    return [m.group(0).lower() for m in _ALNUM_CHUNK.finditer(token)]
+
+
+def _token_to_digit_str(token: str) -> str:
+    """Se il token è cifra o parola-numero IT → stringa numerica; altrimenti invariato.
+
+    `03` resta `03` (la compressione leading-zero avviene nel merge run).
+    `tre` → `3`; `venti` → `20`; `spesa` → `spesa`.
+    """
+    # Già solo cifre: non tocchiamo il padding qui.
+    if token.isdigit():
+        return token
+    # Parola-numero nota → cifre decimali senza padding.
+    if token in _IT_NUMBER_WORDS:
+        return str(_IT_NUMBER_WORDS[token])
+    return token
+
+
+def _merge_numeric_run(digit_tokens: list[str]) -> str:
+    """Fonde una run di token già numerici in un unico intero canonico.
+
+    Regole (in ordine):
+    - decina (20..90) + unità 1..9 → somma (`20`,`3` → `23`);
+    - `100` + n < 100 → somma (`100`,`3` → `103`);
+    - altrimenti concatenazione cifre (`0`,`3` → `03` → int → `3`).
+    Così `progetto_03` e `progetto zero tre` condividono `progetto_3`.
+    """
+    if not digit_tokens:
+        return ""
+
+    # Accumuliamo pezzi stringa; a volte sostituiamo l’ultimo (decine+unità).
+    pieces: list[str] = [digit_tokens[0]]
+    for nxt in digit_tokens[1:]:
+        prev_i = int(pieces[-1])
+        cur_i = int(nxt)
+        # “venti tre” / “trenta cinque”: composizione italiana decina+unità.
+        if prev_i in _IT_TENS and 1 <= cur_i <= 9:
+            pieces[-1] = str(prev_i + cur_i)
+        # “cento tre” (raro nei nomi file, ma simmetrico alle decine).
+        elif prev_i == 100 and 0 < cur_i < 100:
+            pieces[-1] = str(prev_i + cur_i)
+        else:
+            # Cifre isolate o padded: le concateniamo poi normalizziamo con int().
+            pieces.append(nxt)
+
+    # Una sola composizione già chiusa (es. 23) oppure "0"+"3" → 3.
+    combined = "".join(pieces)
+    return str(int(combined))
+
+
+def _number_canonical_key(raw: str) -> str:
+    """Chiave stem con numeri unificati (parole↔cifre, padding, separatorivarianti).
+
+    Pipeline: separatorivarianti → chunk alfanumerici → parole-numero→cifre →
+    merge run numeriche → re-join con `_`.
+    """
+    # Prima i separatorivarianti: `progetto-03` e `progetto 03` → stesso split.
+    base = _normalize_stem_key(raw)
+    if not base:
+        return ""
+
+    # Token su `_`, poi spezza misti (`zero3`) e mappa parole-numero.
+    flat: list[str] = []
+    for tok in base.split("_"):
+        for chunk in _split_alnum_chunks(tok):
+            flat.append(_token_to_digit_str(chunk))
+
+    if not flat:
+        return ""
+
+    # Cammina la lista: run di soli digit → un token; resto letterale invariato.
+    out: list[str] = []
+    i = 0
+    while i < len(flat):
+        if flat[i].isdigit():
+            # Raccogli la run numerica massima, poi fondila in un int canonico.
+            j = i
+            run: list[str] = []
+            while j < len(flat) and flat[j].isdigit():
+                run.append(flat[j])
+                j += 1
+            out.append(_merge_numeric_run(run))
+            i = j
+        else:
+            out.append(flat[i])
+            i += 1
+
+    # Re-normalizza: eventuali vuoti / `__` da pezzi degeneri.
+    return _normalize_stem_key("_".join(out))
+
+
 def _scan_stem_map(workspace_dir: Path) -> dict[str, list[Path]]:
-    """Scansiona i file sotto workspace → stem_normalizzato → path relativi.
+    """Scansiona i file sotto workspace → stem_canonico → path relativi.
 
     Solo `is_file()`; directory ignorate. Collisioni stesso stem → lista
     (es. `notes/spesa.txt` e `inbox/spesa.pdf`).
+    Chiave = `_number_canonical_key(stem)` così `progetto_03` ≡ `progetto_3`.
     """
     root = workspace_dir.resolve()
     stem_map: dict[str, list[Path]] = {}
@@ -104,8 +249,8 @@ def _scan_stem_map(workspace_dir: Path) -> dict[str, list[Path]]:
         except ValueError:
             # Fuori root (symlink): skip silenzioso, non è candidato sicuro.
             continue
-        # Chiave = stem del basename, non l’intero path (cartella non conta).
-        key = _normalize_stem_key(abs_path.stem)
+        # Chiave numerica-aware: parola/cifra/padding non devono cambiare il match.
+        key = _number_canonical_key(abs_path.stem)
         if not key:
             continue
         stem_map.setdefault(key, []).append(rel)
@@ -116,7 +261,7 @@ def _scan_stem_map(workspace_dir: Path) -> dict[str, list[Path]]:
 def _clean_stt_input(stt_input: str) -> str:
     """Pulisce la traccia STT/tool fino a uno stem confrontabile con la mappa.
 
-    Passi: lower → togli “punto/dot + ext” → togli stopword → spazi/trattini → `_`.
+    Passi: lower → togli “punto/dot + ext” → togli stopword → numeri canonici.
     Path con cartella o suffix noti: resta solo lo stem del basename.
     """
     text = (stt_input or "").strip().lower()
@@ -140,8 +285,8 @@ def _clean_stt_input(stt_input: str) -> str:
     if not kept:
         return ""
 
-    # Unisci e ri-normalizza: stesso formato delle chiavi della mappa.
-    return _normalize_stem_key("_".join(kept))
+    # Numeri: `zero tre` / `03` / `zero3` → stessa chiave della mappa FS.
+    return _number_canonical_key("_".join(kept))
 
 
 def _filter_by_suffix(
@@ -198,24 +343,24 @@ def resolve_file_path(
 ) -> Path | None:
     """Ritorna Path relativo al workspace, oppure None se sotto soglia / mappa vuota.
 
-    Waterfall: scan → pulizia STT → exact stem → fuzzy WRatio ≥ threshold.
+    Waterfall: scan → pulizia STT (+ numeri) → exact stem → fuzzy WRatio ≥ threshold.
     `allowed_suffixes` filtra dopo lo scan (es. `{".pdf"}`); `None` = tutti i file.
     """
     # Workspace assente o non directory: niente da risolvere.
     if not workspace_dir.is_dir():
         return None
 
-    # 1) Scan: stem → lista di path relativi (collisioni preservate).
+    # 1) Scan: stem numerico-canonico → lista di path relativi.
     stem_map = _scan_stem_map(workspace_dir)
     if not stem_map:
         return None
 
-    # 2) Pulizia STT: stopword + pronunce ext → stem canonico.
+    # 2) Pulizia STT: stopword + pronunce ext + unificazione numeri.
     cleaned = _clean_stt_input(stt_input)
     if not cleaned:
         return None
 
-    # 3a) Exact: chiave mappa == cleaned.
+    # 3a) Exact: chiave mappa == cleaned (già number-aware).
     if cleaned in stem_map:
         exact = _resolve_from_key(cleaned, cleaned, stem_map, allowed_suffixes)
         if exact is not None:

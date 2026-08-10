@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from sandbox.ollama_fs_lab.file_resolver import _clean_stt_input, resolve_file_path
+from sandbox.ollama_fs_lab.file_resolver import (
+    _clean_stt_input,
+    _number_canonical_key,
+    resolve_file_path,
+)
 from sandbox.ollama_fs_lab.tools_fs import append_note, read_text_file
 from sandbox.ollama_fs_lab.tools_pdf import read_pdf
 
@@ -176,3 +180,57 @@ def test_tool_smoke_append_note_dirty_name(
     # Verifica side-effect: append con newline se il file già terminava con \n.
     body = (workspace / "notes" / "spesa.txt").read_text(encoding="utf-8")
     assert body == "latte e pane\nuova"
+
+
+@pytest.fixture
+def workspace_progetto(tmp_path: Path) -> Path:
+    """Workspace con notes/progetto_03.txt per varianti numero/STT."""
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    # Sul disco: underscore + zero-padding tipico Windows/lab.
+    (notes / "progetto_03.txt").write_text("bozza\n", encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("progetto_03", "progetto_3"),
+        ("progetto-03", "progetto_3"),
+        ("progetto 03", "progetto_3"),
+        ("progetto zero tre", "progetto_3"),
+        ("progetto zero3", "progetto_3"),
+        ("progetto 0 3", "progetto_3"),
+        ("progetto tre", "progetto_3"),
+        ("progetto_3", "progetto_3"),
+        ("verbale venti tre", "verbale_23"),
+        ("verbale_23", "verbale_23"),
+    ],
+)
+def test_number_canonical_key_variants(raw: str, expected: str) -> None:
+    """Parole-numero, padding e separatorivarianti collassano sulla stessa chiave."""
+    assert _number_canonical_key(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "stt",
+    [
+        "progetto 03",
+        "progetto_03",
+        "progetto-03",
+        "progetto zero tre",
+        "progetto zero3",
+        "leggi progetto zero tre",
+        "apri il file progetto 03",
+        "progetto tre",
+    ],
+)
+def test_resolve_progetto_number_variants(workspace_progetto: Path, stt: str) -> None:
+    """STT con cifre/parole/separatori → stesso notes/progetto_03.txt."""
+    rel = resolve_file_path(stt, workspace_progetto)
+    assert rel == Path("notes/progetto_03.txt")
+
+
+def test_clean_stt_number_words_to_digits() -> None:
+    """Dopo stopword, 'zero tre' diventa chiave numerica canonica."""
+    assert _clean_stt_input("leggi progetto zero tre") == "progetto_3"
