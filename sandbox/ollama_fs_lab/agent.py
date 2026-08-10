@@ -300,5 +300,5 @@ def run_chat_loop(
 
 def build_default_llm() -> LocalOllama:
     """Client LocalOllama puntato a config del lab (URL + modello Step 0)."""
-    # Timeout alto: cold start qwen2.5:3b su Ryzen 3 può superare i 30s.
-    return LocalOllama(base_url=OLLAMA_URL, model=OLLAMA_MODEL, timeout=180.0)
+    # Timeout alto: cold start qwen2.5:3b su Ryzen 3 può superare i 3 minuti.
+    return LocalOllama(base_url=OLLAMA_URL, model=OLLAMA_MODEL, timeout=300.0)
