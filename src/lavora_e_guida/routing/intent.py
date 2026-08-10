@@ -23,17 +23,23 @@ class IntentLabel(str, Enum):
     GENERAL = "GENERAL"
 
 
-# Prompt corto: i 2–3B reggono meglio istruzioni brevi + JSON stretto.
+# Prompt 3B-safe: niente placeholder <LABEL>, chiavi fisse, un esempio reale.
 _SYSTEM_PROMPT = (
     "Sei un classificatore di intent per un assistente vocale in auto. "
-    "Rispondi SOLO con un oggetto JSON: "
-    '{"intent":"<LABEL>","confidence":0.0} '
-    "dove LABEL è una di: SYSTEM_FILE, CURSOR, WEB_EMAIL, GENERAL. "
-    "SYSTEM_FILE = file, cartelle, path, copia/sposta/elimina sul filesystem. "
-    "CURSOR = codice, repository, Cursor IDE, debug, refactor. "
-    "WEB_EMAIL = ricerca web, browse, email, Gmail, calendario. "
-    "GENERAL = tutto il resto (chat, orario, domande generiche). "
-    "confidence tra 0 e 1. Nessun altro testo."
+    "Rispondi ESCLUSIVAMENTE con un oggetto JSON valido. "
+    "Nessun markdown, nessun testo fuori dal JSON.\n\n"
+    'SCHEMA: {"intent": "string", "confidence": 0.0}\n'
+    "intent ammessi: SYSTEM_FILE, CURSOR, WEB_EMAIL, GENERAL.\n"
+    "SYSTEM_FILE = file, cartelle, path, copia/sposta/elimina.\n"
+    "CURSOR = codice, repository, Cursor IDE, debug, refactor.\n"
+    "WEB_EMAIL = ricerca web, browse, email, Gmail, calendario.\n"
+    "GENERAL = tutto il resto.\n\n"
+    "REGOLE TASSATIVE:\n"
+    "1. Emetti UN SOLO oggetto JSON per risposta.\n"
+    "2. confidence deve essere un numero tra 0 e 1.\n\n"
+    "ESEMPIO CORRETTO:\n"
+    "Utente: elenca i file nella cartella documenti\n"
+    'JSON: {"intent": "SYSTEM_FILE", "confidence": 0.9}'
 )
 
 

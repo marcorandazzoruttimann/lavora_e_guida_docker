@@ -98,7 +98,7 @@ print(create_text_file('spesa.txt', 'latte\\npane'))
 
 Tool JSON per aggiungere testo a una nota sotto `notes/` (crea il file se manca):
 
-- Schema: `{"tool":"append_note","args":{"name":"…","text":"…"}}` oppure `{"tool":"none","reply":"…"}`.
+- Schema: `{"tool":"append_note","args":{"name":"…","content":"…"}}` oppure `{"tool":"none","reply":"…"}`.
 - Nome senza cartella (es. `spesa.txt`) → `notes/spesa.txt`; path con cartella resta relativo al root.
 - Append: se il file esiste e non termina con newline, ne viene aggiunta una prima del pezzo nuovo.
 - Restano attivi anche `create_text_file` e `tool=none`.
@@ -135,7 +135,7 @@ print((WORKSPACE_ROOT / 'notes' / 'spesa.txt').read_text(encoding='utf-8'))
 Tool JSON per rileggere un file e far stampare il contenuto via MockTTS:
 
 - Schema: `{"tool":"read_text_file","args":{"name":"…"}}` oppure `{"tool":"none","reply":"…"}`.
-- Path relativo al root; se il bare name manca in root, si prova `notes/<name>` (coerenza Step 3).
+- Path risolto in Python (RapidFuzz): basta il nome dal comando (anche senza cartella/estensione).
 - Dopo la lettura il modello deve rispondere con `tool=none` ripetendo il contenuto a voce → `[TTS] …`.
 - Restano attivi anche `create_text_file` e `append_note`.
 

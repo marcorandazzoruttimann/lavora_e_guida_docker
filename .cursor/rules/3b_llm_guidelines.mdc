@@ -1,0 +1,43 @@
+---
+alwaysApply: true
+---
+# ARCHITECTURAL RULES: Design delle Interfacce e System Prompt per LLM 3B (Qwen 3B)
+
+Questo progetto utilizza modelli locali di piccole dimensioni (es. Qwen 2.5 3B) eseguiti su architetture CPU-bound. 
+I modelli 3B hanno capacità cognitive, di parsing e di attenzione ridotte rispetto a modelli cloud (100B+). Per evitare allucinazioni, rotture del formato JSON e perdite di argomenti, OGNI modifica ai System Prompt o agli strumenti di Orchestration DEVE rispettare tassativamente i seguenti 5 principi guida:
+
+---
+
+## 1. Zero Placeholder Simbolici (`<...>` o `{...}`)
+- **Problema:** I modelli 3B soffrono di *Pattern Echoing* o *Example Leakage*. Se vedono `<nome_file>` o `<testo>`, tendono a ricopiare letteralmente la stringa del placeholder invece di estrarre l'entità dall'input dell'utente.
+- **Regola:** Nei System Prompt non usare mai sintassi come `<nome>` o `<testo>`. Usa i tipi di dato nativi (`"string"`, `"integer"`) oppure token semantici espliciti.
+
+---
+
+## 2. Omogeneità e Unificazione delle Chiavi JSON
+- **Problema:** Un modello 3B va in crisi se deve associare chiavi diverse per azioni simili (es. `content` per `create_file` e `text` per `append_note`).
+- **Regola:** Standardizzare i nomi dei parametri per tutti i tool correlati. Usare una singola chiave generica e coerente per la stessa tipologia di dato (es. `content` per qualsiasi payload di testo, `name` per qualsiasi identificarore di file).
+
+---
+
+## 3. One-Shot Concrete Examples (Esempi Reali, Non Schemi Astratti)
+- **Problema:** Spiegazioni astratte delle regole portano a risposte non strutturate o al mancato passaggio di parametri.
+- **Regola:** Includere SEMPRE un esempio di dialogo reale completo (In-Context Learning), dove si mostra la conversione diretta da un input vocale dell'utente a un output JSON valido.
+  - *Esempio valido:* `Utente: "Aggiungi latte alla spesa" -> JSON: {"tool": "append_note", "args": {"name": "spesa", "content": "latte"}}`
+
+---
+
+## 4. Single-Action Enforcement (Un solo Tool per Turno)
+- **Problema:** Il parallel tool calling (più oggetti JSON nello stesso turno) fallisce quasi sempre su un 3B, generando sintassi JSON non valide o parametri incrociati.
+- **Regola:** Forzare il modello a eseguire SEMPRE e SOLTANTO una singola azione per turno. Se un'operazione richiede più passaggi, deve essere l'Orchestrator Python a gestire la sequenza, oppure il dialogo deve procedere turno per turno.
+
+---
+
+## 5. Riduzione dell'Impronta di Attenzione (Context Window Budget)
+- **Problema:** Più il System Prompt è lungo e verboso, meno capacità di attenzione rimane al modello 3B per estrarre le variabili dall'input dell'utente (*Attention Dilution*).
+- **Regola:** Mantenere il System Prompt compatto, con frasi brevi, direttive imperative e zero spiegazioni teoriche. Le regole devono essere scritte come vincoli logici stretti (`REGOLE TASSATIVE: 1... 2... 3...`).
+
+---
+
+**SOP per lo Sviluppatore / Agent:**
+Prima di generare o modificare qualsiasi script Python che interagisce con l'LLM, verifica che il prompt generato rispetti tutti e 5 i punti sopra indicati.

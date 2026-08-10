@@ -150,17 +150,18 @@ def _new_note_create_rel(name: str) -> str:
     return f"notes/{with_ext}"
 
 
-def append_note(name: str, text: str) -> str:
+def append_note(name: str, content: str) -> str:
     """Appende testo UTF-8 a una nota (crea il file se non esiste).
 
     Side-effect: scrive sotto WORKSPACE_ROOT.
     Match esistente: `resolve_file_path` (tutti i suffix). Miss → crea
     `notes/{stem}.txt` (solo path di creazione, non ricerca).
+    Parametro `content` allineato allo schema JSON del lab (come create).
     Se il file esiste e non termina con newline, ne aggiungiamo una prima
     del pezzo nuovo così due append consecutive restano leggibili su Windows.
     """
-    # text None → stringa vuota: append no-op ma file creato se mancava.
-    chunk = "" if text is None else str(text)
+    # content None → stringa vuota: append no-op ma file creato se mancava.
+    chunk = "" if content is None else str(content)
 
     # Nome blank: errore chiaro prima dello scan (stesso contratto degli altri tool).
     if not (name or "").strip():

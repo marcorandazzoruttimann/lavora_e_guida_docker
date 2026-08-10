@@ -22,32 +22,33 @@ from sandbox.ollama_fs_lab.tools_fs import (
 )
 from sandbox.ollama_fs_lab.tools_pdf import read_pdf
 
-# Prompt corto + schema fisso: i 3B seguono meglio poche forme che enum lunghi.
-# create + append + read testo + read_pdf (Step 6).
-# L'LLM è agnostico sul path resolve: passa solo name/content; Python decide il file.
+# Schema unico name+content per create/append: meno campi = meno errori sui 3B.
+# Path resolve resta solo in Python; il modello vede solo name/content/reply.
 _SYSTEM_PROMPT = (
-    "Sei un assistente vocale in italiano per un laboratorio FS. "
-    "Rispondi SEMPRE e SOLO con un oggetto JSON in uno di questi formati:\n"
-    '1) Crea file: {"tool":"create_text_file","args":{"name":"<nome>",'
-    '"content":"<testo>"}}\n'
-    '2) Aggiorna nota: {"tool":"append_note","args":{"name":"<nome>",'
-    '"text":"<testo da aggiungere>"}}\n'
-    '3) Leggi file testo: {"tool":"read_text_file","args":{"name":"<nome>"}}\n'
-    '4) Leggi PDF: {"tool":"read_pdf","args":{"name":"<nome>"}}\n'
-    '5) Risposta parlata: {"tool":"none","reply":"<testo italiano breve>"}\n'
-    "Regole: in args.name usa il nome del file indicato dall'utente "
-    "(niente path assoluti né '..'). "
-    "Dopo create/append, conferma con tool=none. Dopo read_text_file o "
-    "read_pdf, rispondi con tool=none: ripeti il contenuto, rispondi alla "
-    "domanda dell'utente, oppure riassumi in italiano come richiesto. "
+    "Sei l'assistente vocale del laboratorio. Rispondi ESCLUSIVAMENTE con un "
+    "oggetto JSON valido. "
+    "Non usare mai blocchi markdown ```json. Nessun testo prima o dopo il JSON.\n\n"
+    "TOOL DISPONIBILI E SCHEMI JSON:\n"
+    '- Crea file: {"tool": "create_text_file", "args": {"name": "string", '
+    '"content": "string"}}\n'
+    '- Aggiorna file: {"tool": "append_note", "args": {"name": "string", '
+    '"content": "string"}}\n'
+    '- Leggi file: {"tool": "read_text_file", "args": {"name": "string"}}\n'
+    '- Leggi PDF: {"tool": "read_pdf", "args": {"name": "string"}}\n'
+    '- Risposta parlata: {"tool": "none", "reply": "string"}\n\n'
     "REGOLE TASSATIVE:\n"
-    "- Niente markdown (no ```json), nessun testo o spiegazione fuori dal JSON.\n"
-    "- Se ricevi l'Esito di un tool 'read_text_file' o 'read_pdf' con stato OK, "
-    "il tuo prossimo turno DEVE essere un JSON con tool=none e in reply "
-    "devi usare il testo estratto (contenuto, Q&A o riassunto).\n"
-    "- Se ricevi un Esito di un tool con stato ERRORE, "
-    "il tuo prossimo turno DEVE essere un JSON con tool=none avvisando brevemente "
-    "l'utente che il file non esiste o non è leggibile. NON riprovare lo stesso comando."
+    "1. Emetti UN SOLO oggetto JSON con UN SOLO tool per risposta.\n"
+    "2. Usa la chiave 'content' sia per create_text_file che per append_note "
+    "per specificare il testo da scrivere.\n"
+    "3. Estrai SEMPRE dall'input dell'utente sia il nome del file che "
+    "l'elemento da aggiungere/scrivere.\n"
+    "4. Se l'utente dice 'Aggiungi cetrioli alla spesa', il JSON deve "
+    "contenere 'name': 'spesa' e 'content': 'cetrioli'.\n"
+    "5. Dopo un Esito OK o ERRORE di un tool, rispondi SEMPRE con tool='none' "
+    "e la conferma in 'reply'.\n\n"
+    "ESEMPIO CORRETTO:\n"
+    "Utente: Aggiungi latte alla lista spesa\n"
+    'JSON: {"tool": "append_note", "args": {"name": "spesa", "content": "latte"}}'
 )
 
 # Comandi di uscita case-insensitive: allineati al main Phase 2 del progetto.
@@ -97,22 +98,24 @@ def _dispatch_tool(tool: str, args: dict[str, Any]) -> str:
         return "ERRORE: args.name deve essere una stringa non vuota (es. spesa.txt)."
 
     try:
-        if tool == _TOOL_CREATE:
-            # content può essere int/list se il modello sbaglia tipo → forziamo str.
-            content = args.get("content", "")
-            return create_text_file(name, "" if content is None else str(content))
-
         if tool == _TOOL_READ:
             # Solo name: la lettura non ha body; path risolto in tools_fs.
             return read_text_file(name)
 
         if tool == _TOOL_PDF:
-            # Solo name: estrazione pypdf; path risolto in tools_pdf (RapidFuzz).
+            # Solo name: estrazione pypdf; path risolto in tools_pdf.
             return read_pdf(name)
 
-        # append_note: il campo canonicamente è `text`; alcuni 3B riusano content.
-        text = args.get("text", args.get("content", ""))
-        return append_note(name, "" if text is None else str(text))
+        # create + append: stesso campo `content` (schema unificato nel prompt).
+        # Fallback `text`: alcuni 3B riusano ancora la chiave legacy.
+        raw_content = args.get("content", args.get("text", ""))
+        content = "" if raw_content is None else str(raw_content)
+
+        if tool == _TOOL_CREATE:
+            return create_text_file(name, content)
+
+        # Whitelist già filtrata: qui resta solo append_note.
+        return append_note(name, content)
     except FsToolError as exc:
         # Path traversal / assoluti / file assente: messaggio già in italiano.
         return f"ERRORE: {exc}"
@@ -137,14 +140,17 @@ def _parse_agent_json(raw: str) -> dict[str, Any]:
 
 
 def _json_schema_hint() -> str:
-    """Messaggio di recovery quando il JSON del modello è rotto o incompleto."""
+    """Messaggio di recovery quando il JSON del modello è rotto o incompleto.
+
+    Tipi `"string"` (non `...` / `<...>`): evita pattern echoing sui 3B.
+    """
     return (
-        "JSON non valido. Rispondi SOLO con "
-        '{"tool":"none","reply":"..."} oppure '
-        '{"tool":"create_text_file","args":{"name":"...","content":"..."}} '
-        'oppure {"tool":"append_note","args":{"name":"...","text":"..."}} '
-        'oppure {"tool":"read_text_file","args":{"name":"..."}} '
-        'oppure {"tool":"read_pdf","args":{"name":"..."}}.'
+        "JSON non valido. Emetti UN SOLO oggetto JSON. Schema ammesso: "
+        '{"tool":"none","reply":"string"} oppure '
+        '{"tool":"create_text_file","args":{"name":"string","content":"string"}} '
+        'oppure {"tool":"append_note","args":{"name":"string","content":"string"}} '
+        'oppure {"tool":"read_text_file","args":{"name":"string"}} '
+        'oppure {"tool":"read_pdf","args":{"name":"string"}}.'
     )
 
 
@@ -264,11 +270,12 @@ def run_chat_loop(
             # --- TOOL EXEC: Python esegue, risultato torna al modello ------
             args = parsed.get("args")
             if args is None and "name" in parsed:
-                # Fallback: modello mette name/content/text a top-level.
+                # Fallback: modello mette name/content a top-level (senza args).
+                # Accettiamo anche `text` legacy e lo normalizziamo a `content`.
+                top_content = parsed.get("content", parsed.get("text", ""))
                 args = {
                     "name": parsed.get("name"),
-                    "content": parsed.get("content", ""),
-                    "text": parsed.get("text", parsed.get("content", "")),
+                    "content": top_content,
                 }
             result = _dispatch_tool(tool, args if isinstance(args, dict) else {})
 
