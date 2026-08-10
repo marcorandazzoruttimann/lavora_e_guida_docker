@@ -165,6 +165,44 @@ print(read_text_file('spesa.txt'))
 
 
 
+## Step 6 — `read_pdf` da `inbox/` → Q&A / riassunto
+
+Tool JSON che estrae testo da un PDF (dipendenza `pypdf`) e lo passa al modello:
+
+- Schema: `{"tool":"read_pdf","args":{"name":"…"}}` oppure `{"tool":"none","reply":"…"}`.
+- Copia a mano il PDF in `Ollama_test/inbox/` (Windows Desktop).
+- Nome senza cartella (es. `verbale.pdf`) → cerca in `inbox/`, poi in root.
+- Testo lungo: tetto ~8000 caratteri (troncamento segnalato nell’esito).
+- Dopo l’estrazione: `tool=none` con risposta / riassunto basato sul testo.
+- Extra: `pip install pypdf` oppure `pip install -e ".[lab]"` dalla root del repo.
+
+Prompt di prova (dopo aver messo un PDF in `inbox/`):
+
+> Leggi il PDF sample_lab.pdf e riassumilo in italiano in 3 frasi
+
+```bash
+# dipendenza Step 6
+pip install -e ".[lab]"
+
+printf 'Leggi il PDF sample_lab.pdf e riassumilo in italiano in 3 frasi\nesci\n' \
+  | PYTHONPATH=src:. python -m sandbox.ollama_fs_lab
+```
+
+**Done**: risposta `[TTS]` basata sul testo estratto dal PDF in `inbox/`.
+
+Verifica diretta del tool (senza LLM):
+
+```bash
+PYTHONPATH=src:. python -c "
+from sandbox.ollama_fs_lab.tools_fs import ensure_workspace
+from sandbox.ollama_fs_lab.tools_pdf import read_pdf
+ensure_workspace()
+print(read_pdf('sample_lab.pdf')[:500])
+"
+```
+
+
+
 ## Checklist step
 
 
