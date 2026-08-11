@@ -2,19 +2,33 @@
 
 Step 2: `create_text_file` (default `.txt` se manca l'estensione);
 Step 3: `append_note` — resolve RapidFuzz, create-on-miss sotto notes/;
-Step 4: `read_text_file` — resolve RapidFuzz (suffix testo).
+Step 4/6: `read_file` — resolve unificato (testo + PDF), dispatch pypdf se `.pdf`.
 Ogni path utente è risolto e verificato: fuori dal root → errore parlante, niente I/O.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from sandbox.ollama_fs_lab.config import WORKSPACE_ROOT
 from sandbox.ollama_fs_lab.file_resolver import resolve_file_path
 
-# Suffix ammessi in lettura testo: evita collisioni stem con PDF/binari.
+# Suffix leggibili da `read_file`: testo UTF-8 + PDF (estrazione pypdf).
+_READ_FILE_SUFFIXES: frozenset[str] = frozenset({".txt", ".md", ".json", ".pdf"})
+# Solo testo: preferenza omonimi quando l'utente non cita esplicitamente PDF.
 _READ_TEXT_SUFFIXES: frozenset[str] = frozenset({".txt", ".md", ".json"})
+# Solo PDF: usato se hint `.pdf` / «punto pdf» sull'input grezzo.
+_PDF_SUFFIXES: frozenset[str] = frozenset({".pdf"})
+
+# Tetto contesto per qwen2.5:3b: PDF lunghi non devono saturare il prompt.
+_MAX_PDF_CHARS = 4000
+
+# Pronuncia STT dell'estensione PDF: rilevata PRIMA della pulizia stem del resolver.
+_PDF_HINT_PRONUNCIATION = re.compile(
+    r"\b(?:punto|dot)\s+pdf\b",
+    re.IGNORECASE,
+)
 
 
 class FsToolError(ValueError):
@@ -203,12 +217,108 @@ def append_note(name: str, content: str) -> str:
     )
 
 
-def read_text_file(name: str) -> str:
-    """Legge un file di testo UTF-8 sotto WORKSPACE_ROOT e ne restituisce il contenuto.
+def _has_pdf_hint(raw_name: str) -> bool:
+    """True se l'input grezzo cita esplicitamente un PDF (prima della pulizia stem).
 
-    Ritorna una stringa di esito per il modello (prefisso OK + corpo).
-    Side-effect: nessuno in scrittura. Path risolto da `resolve_file_path`
-    (suffix `.txt`/`.md`/`.json`); nessuno match → FsToolError parlante.
+    Contratto: `.pdf` nel basename/path, oppure pronuncia STT «punto/dot pdf».
+    Senza hint, `read_file` preferisce omonimi testo sullo stesso stem.
+    """
+    text = (raw_name or "").strip().lower()
+    if not text:
+        return False
+    # Basename con suffix .pdf (anche path `inbox/spesa.pdf` o `spesa.PDF`).
+    as_path = Path(text.replace("\\", "/"))
+    if as_path.suffix.lower() == ".pdf":
+        return True
+    # Suffisso citato a metà frase (es. `leggi spesa.pdf per favore`).
+    if ".pdf" in text:
+        return True
+    # Pronuncia STT: stessa famiglia di `_EXT_PRONUNCIATION` ma solo su pdf.
+    return _PDF_HINT_PRONUNCIATION.search(text) is not None
+
+
+def _resolve_readable_rel(name: str, root: Path) -> Path | None:
+    """Risolve un path relativo leggibile con preferenza testo / hint PDF.
+
+    Hint PDF → solo `.pdf`. Altrimenti prova testo (`.txt`/`.md`/`.json`) e,
+    se assente, fallback PDF: così omonimi stesso stem preferiscono il testo.
+    """
+    # Hint esplicito: restringiamo lo scan così WRatio non sceglie lo .txt omonimo.
+    if _has_pdf_hint(name):
+        return resolve_file_path(name, root, allowed_suffixes=_PDF_SUFFIXES)
+
+    # Preferenza testo: omonimi notes/spesa.txt + inbox/spesa.pdf → il .txt.
+    rel = resolve_file_path(name, root, allowed_suffixes=_READ_TEXT_SUFFIXES)
+    if rel is not None:
+        return rel
+    # Solo PDF (o nessun testo match): seconda passata su suffix PDF.
+    return resolve_file_path(name, root, allowed_suffixes=_PDF_SUFFIXES)
+
+
+def _extract_pdf_text(
+    path: Path,
+    max_chars: int,
+    *,
+    display: str,
+) -> tuple[str, bool]:
+    """Estrae testo da un PDF con pypdf; ritorna `(testo, troncato)`.
+
+    Side-effect: nessuno in scrittura. Import lazy di pypdf (extra opzionale).
+    `display` = path relativo parlante nei messaggi FsToolError.
+    PDF cifrato / vuoto / corrotto → FsToolError parlante.
+    """
+    # Import lazy: messaggio chiaro se manca l'extra senza rompere Step 1–5.
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise FsToolError(
+            "pypdf non installato: esegui `pip install pypdf` "
+            '(oppure `pip install -e ".[lab]"` dalla root del repo).'
+        ) from exc
+
+    # Apertura binaria: pypdf gestisce stream; errori tipici → messaggio parlante.
+    try:
+        reader = PdfReader(str(path))
+    except Exception as exc:  # noqa: BLE001 — PDF corrotti variano molto
+        raise FsToolError(f"PDF {display!r} non leggibile: {exc}") from exc
+
+    # PDF cifrati senza password: pypdf espone is_encrypted; non tentiamo crack.
+    if getattr(reader, "is_encrypted", False):
+        raise FsToolError(
+            f"PDF {display!r} è protetto da password: "
+            "non posso estrarre il testo."
+        )
+
+    # Concateniamo pagina per pagina: spazio tra pagine evita parole attaccate.
+    parts: list[str] = []
+    for page in reader.pages:
+        # extract_text può tornare None su pagine solo-immagine.
+        chunk = page.extract_text() or ""
+        if chunk.strip():
+            parts.append(chunk)
+    text = "\n\n".join(parts).strip()
+
+    if not text:
+        raise FsToolError(
+            f"PDF {display!r} senza testo estraibile "
+            "(forse solo immagini: serve OCR, fuori scope del lab)."
+        )
+
+    # Troncamento esplicito: il modello sa che il contesto è parziale.
+    truncated = False
+    if max_chars > 0 and len(text) > max_chars:
+        text = text[:max_chars]
+        truncated = True
+    return text, truncated
+
+
+def read_file(name: str, *, max_chars: int = _MAX_PDF_CHARS) -> str:
+    """Legge un file testo o PDF sotto WORKSPACE_ROOT e ne restituisce il contenuto.
+
+    Ritorna stringa di esito (prefisso `OK: contenuto di …` + corpo).
+    Side-effect: nessuno in scrittura. Resolve su
+    `{.txt,.md,.json,.pdf}`; hint PDF → preferenza `.pdf`, altrimenti testo.
+    Branch `.pdf` → pypdf (tetto `max_chars`); resto → UTF-8.
     """
     # Nome blank: messaggio chiaro senza dipendere dal None del resolver.
     if not (name or "").strip():
@@ -216,16 +326,12 @@ def read_text_file(name: str) -> str:
 
     # Scan + fuzzy: l'LLM può passare nome sporco / senza cartella né estensione.
     root = WORKSPACE_ROOT.resolve()
-    rel = resolve_file_path(
-        name,
-        root,
-        allowed_suffixes=_READ_TEXT_SUFFIXES,
-    )
+    rel = _resolve_readable_rel(name, root)
     if rel is None:
         display = (name or "").strip()
         raise FsToolError(
             f"File '{display}' non trovato nel workspace "
-            "(testo: .txt, .md, .json)."
+            "(leggibili: .txt, .md, .json, .pdf)."
         )
 
     # Relativo → assoluto confinato; safety su traversal anche dopo il resolver.
@@ -234,10 +340,35 @@ def read_text_file(name: str) -> str:
     if not target.is_file():
         raise FsToolError(
             f"File '{rel.as_posix()}' non trovato nel workspace "
-            "(testo: .txt, .md, .json)."
+            "(leggibili: .txt, .md, .json, .pdf)."
         )
 
-    # UTF-8: stesso encoding di create/append; binari filtrati dai suffix.
+    # Safety: solo suffix ammessi (il filtro resolve già esclude il resto).
+    suffix = target.suffix.casefold()
+    if suffix not in _READ_FILE_SUFFIXES:
+        raise FsToolError(
+            f"file {rel.as_posix()!r} non leggibile "
+            "(ammessi: .txt, .md, .json, .pdf)."
+        )
+
+    # Branch PDF: estrazione pypdf + annotazioni (estratto)/(troncato) nel prefisso.
+    if suffix == ".pdf":
+        text, truncated = _extract_pdf_text(
+            target,
+            max_chars,
+            display=rel.as_posix(),
+        )
+        # Prefisso unificato: stesso marker dei file testo, più note PDF.
+        notes = ["estratto"]
+        if truncated:
+            notes.append("troncato")
+        note_s = ", ".join(notes)
+        return (
+            f"OK: contenuto di {rel.as_posix()} "
+            f"({note_s}, {len(text)} caratteri):\n{text}"
+        )
+
+    # Branch testo: stesso encoding di create/append.
     try:
         text = target.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
@@ -246,7 +377,6 @@ def read_text_file(name: str) -> str:
         ) from exc
 
     # Path relativo: il modello lo cita in TTS senza esporre /mnt/c/….
-    # Corpo dopo il marker: l'agente lo rilegge a voce (Step 4 Done).
     return (
         f"OK: contenuto di {rel.as_posix()} "
         f"({len(text)} caratteri):\n{text}"

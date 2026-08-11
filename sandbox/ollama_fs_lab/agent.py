@@ -1,12 +1,13 @@
 """Loop singolo agente: MockSTT → LocalOllama (JSON tool) → FsTools → MockTTS.
 
-Step 2–6: il modello può chiamare create/append/read testo e `read_pdf` sul
+Step 2–6: il modello può chiamare create/append/`read_file` (testo + PDF) sul
 workspace Desktop. Schema JSON stretto (format=json + extract) perché i 3B
 sbagliano facilmente con tool nativi Ollama troppo aperti.
 """
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import Any, Protocol
 
@@ -18,10 +19,8 @@ from sandbox.ollama_fs_lab.tools_fs import (
     FsToolError,
     append_note,
     create_text_file,
-    read_text_file,
+    read_file,
 )
-from sandbox.ollama_fs_lab.tools_pdf import read_pdf
-
 # Schema unico name+content per create/append: meno campi = meno errori sui 3B.
 # Path resolve resta solo in Python; il modello vede solo name/content/reply.
 _SYSTEM_PROMPT = (
@@ -33,8 +32,7 @@ _SYSTEM_PROMPT = (
     '"content": "string"}}\n'
     '- Aggiorna file: {"tool": "append_note", "args": {"name": "string", '
     '"content": "string"}}\n'
-    '- Leggi file: {"tool": "read_text_file", "args": {"name": "string"}}\n'
-    '- Leggi PDF: {"tool": "read_pdf", "args": {"name": "string"}}\n'
+    '- Leggi file: {"tool": "read_file", "args": {"name": "string"}}\n'
     '- Risposta parlata: {"tool": "none", "reply": "string"}\n\n'
     "REGOLE TASSATIVE:\n"
     "1. Emetti UN SOLO oggetto JSON con UN SOLO tool per risposta.\n"
@@ -45,10 +43,12 @@ _SYSTEM_PROMPT = (
     "4. Se l'utente dice 'Aggiungi cetrioli alla spesa', il JSON deve "
     "contenere 'name': 'spesa' e 'content': 'cetrioli'.\n"
     "5. Dopo un Esito OK o ERRORE di un tool, rispondi SEMPRE con tool='none' "
-    "e la conferma in 'reply'.\n\n"
+    "e la conferma in 'reply'. Non richiamare lo stesso tool.\n\n"
     "ESEMPIO CORRETTO:\n"
     "Utente: Aggiungi latte alla lista spesa\n"
-    'JSON: {"tool": "append_note", "args": {"name": "spesa", "content": "latte"}}'
+    'JSON: {"tool": "append_note", "args": {"name": "spesa", "content": "latte"}}\n'
+    "Esito tool append_note: OK: riga aggiunta a notes/spesa.txt\n"
+    'JSON: {"tool": "none", "reply": "Ho aggiunto latte alla spesa"}'
 )
 
 # Comandi di uscita case-insensitive: allineati al main Phase 2 del progetto.
@@ -57,9 +57,8 @@ _EXIT_WORDS = frozenset({"esci", "exit", "quit"})
 # Whitelist tool Step 2–6: qualunque altro nome → errore parlante (anti-invenzione).
 _TOOL_CREATE = "create_text_file"
 _TOOL_APPEND = "append_note"
-_TOOL_READ = "read_text_file"
-_TOOL_PDF = "read_pdf"
-_ALLOWED_TOOLS = frozenset({_TOOL_CREATE, _TOOL_APPEND, _TOOL_READ, _TOOL_PDF})
+_TOOL_READ = "read_file"
+_ALLOWED_TOOLS = frozenset({_TOOL_CREATE, _TOOL_APPEND, _TOOL_READ})
 
 # Limite round tool per turno utente: evita loop infinito se il modello ripete.
 _MAX_TOOL_ROUNDS = 4
@@ -82,7 +81,7 @@ class SupportsChat(Protocol):
 def _dispatch_tool(tool: str, args: dict[str, Any]) -> str:
     """Esegue un tool whitelist; ritorna stringa di esito per il modello.
 
-    Side-effect: I/O FS solo via tools_fs / tools_pdf (confinato a WORKSPACE_ROOT).
+    Side-effect: I/O FS solo via tools_fs (confinato a WORKSPACE_ROOT).
     """
     # Whitelist stretta: i 3B inventano nomi tool; rifiutiamo subito.
     if tool not in _ALLOWED_TOOLS:
@@ -99,12 +98,8 @@ def _dispatch_tool(tool: str, args: dict[str, Any]) -> str:
 
     try:
         if tool == _TOOL_READ:
-            # Solo name: la lettura non ha body; path risolto in tools_fs.
-            return read_text_file(name)
-
-        if tool == _TOOL_PDF:
-            # Solo name: estrazione pypdf; path risolto in tools_pdf.
-            return read_pdf(name)
+            # Solo name: testo o PDF; resolve + dispatch pypdf in tools_fs.
+            return read_file(name)
 
         # create + append: stesso campo `content` (schema unificato nel prompt).
         # Fallback `text`: alcuni 3B riusano ancora la chiave legacy.
@@ -127,11 +122,35 @@ def _dispatch_tool(tool: str, args: dict[str, Any]) -> str:
 def _followup_after_tool(tool: str, result: str) -> str:
     """Messaggio user dopo l'esecuzione di un tool.
 
-    Fornisce solo i dati dell'esito senza template o suggerimenti di formattazione,
-    evitando che l'LLM ricopi i placeholder nel campo reply.
+    Chiude con un vincolo imperativo concreto (niente placeholder): i 3B
+    altrimenti ripetono lo stesso tool invece di passare a tool=none.
     """
-    # Stesso formato per create/append/read/pdf: l'LLM vede solo l'esito grezzo.
-    return f"Esito tool {tool}: {result}"
+    # Esito grezzo + regola post-tool in una sola chiusura (budget attenzione).
+    return (
+        f"Esito tool {tool}: {result}\n"
+        "Ora rispondi SOLO con tool none e la conferma o la risposta in reply. "
+        f"Non richiamare {tool}."
+    )
+
+
+def _print_read_file_to_terminal(result: str) -> bool:
+    """Stampa a stdout il contenuto letto da read_file (prefisso [FS]).
+
+    Side-effect: print su stdout. Ritorna True se ha stampato un OK.
+    Il TTS resta sul reply del modello; qui mostriamo il testo al terminale.
+    """
+    # Solo esiti positivi: errori restano nel follow-up verso l'LLM.
+    if not result.startswith("OK:"):
+        return False
+    # Prima riga = header (path + lunghezza); resto = corpo del file.
+    if "\n" in result:
+        header, body = result.split("\n", 1)
+        print(f"[FS] {header}")
+        # Evita doppia newline se il file termina già con \\n.
+        print(body, end="" if body.endswith("\n") else "\n")
+    else:
+        print(f"[FS] {result}")
+    return True
 
 
 def _parse_agent_json(raw: str) -> dict[str, Any]:
@@ -149,8 +168,7 @@ def _json_schema_hint() -> str:
         '{"tool":"none","reply":"string"} oppure '
         '{"tool":"create_text_file","args":{"name":"string","content":"string"}} '
         'oppure {"tool":"append_note","args":{"name":"string","content":"string"}} '
-        'oppure {"tool":"read_text_file","args":{"name":"string"}} '
-        'oppure {"tool":"read_pdf","args":{"name":"string"}}.'
+        'oppure {"tool":"read_file","args":{"name":"string"}}.'
     )
 
 
@@ -174,10 +192,10 @@ def run_chat_loop(
         {"role": "system", "content": _SYSTEM_PROMPT},
     ]
 
-    # Introduzione parlata: conferma Step 6 (anche PDF da inbox/).
+    # Introduzione parlata: un solo tool di lettura (testo + PDF).
     tts.speak(
-        "Lab Ollama FS, step sei: posso creare, aggiornare, leggere testo e "
-        "PDF da inbox sul Desktop. Di' esci per terminare."
+        "Lab Ollama FS, step sei: posso creare, aggiornare e leggere file "
+        "testo o PDF sul Desktop. Di' esci per terminare."
     )
 
     turns = 0
@@ -200,6 +218,8 @@ def run_chat_loop(
 
         # --- THINKING + TOOLS: fino a reply o esaurimento round ------------
         spoken = False
+        # Chiave tool|name già eseguita nel turno: anti-loop sui 3B.
+        prev_tool_key: str | None = None
         for _round in range(_MAX_TOOL_ROUNDS):
             t0 = time.perf_counter()
             try:
@@ -220,8 +240,6 @@ def run_chat_loop(
             elapsed = time.perf_counter() - t0
 
             if report_latency:
-                import sys
-
                 print(f"[lab] latenza chat: {elapsed:.2f}s", file=sys.stderr)
 
             raw = (raw or "").strip()
@@ -277,9 +295,31 @@ def run_chat_loop(
                     "name": parsed.get("name"),
                     "content": top_content,
                 }
-            result = _dispatch_tool(tool, args if isinstance(args, dict) else {})
+            args_dict = args if isinstance(args, dict) else {}
+            tool_name_arg = str(args_dict.get("name") or "")
+            tool_key = f"{tool}|{tool_name_arg.strip().casefold()}"
+            # Anti-loop: i 3B ripetono read_file dopo Esito OK; Python interrompe.
+            if prev_tool_key is not None and tool_key == prev_tool_key:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Hai già ricevuto l'Esito di questo tool. "
+                            "Rispondi ora SOLO con tool none e la conferma in reply. "
+                            "Non richiamare lo stesso tool."
+                        ),
+                    }
+                )
+                continue
 
-            # Ruolo user con esito: format collaudato senza dipendere da role=tool.
+            result = _dispatch_tool(tool, args_dict)
+
+            # read_file: stampa subito il corpo a terminale (non dipende dal TTS).
+            if tool == _TOOL_READ:
+                _print_read_file_to_terminal(result)
+
+            # Ruolo user con esito + vincolo tool=none (anti-ripetizione 3B).
+            prev_tool_key = tool_key
             messages.append(
                 {
                     "role": "user",
@@ -300,5 +340,5 @@ def run_chat_loop(
 
 def build_default_llm() -> LocalOllama:
     """Client LocalOllama puntato a config del lab (URL + modello Step 0)."""
-    # Timeout alto: cold start qwen2.5:3b su Ryzen 3 può superare i 3 minuti.
-    return LocalOllama(base_url=OLLAMA_URL, model=OLLAMA_MODEL, timeout=300.0)
+    # Timeout alto: cold start qwen2.5:3b su Ryzen 3 può superare i 5 minuti.
+    return LocalOllama(base_url=OLLAMA_URL, model=OLLAMA_MODEL, timeout=500.0)

@@ -130,13 +130,14 @@ print((WORKSPACE_ROOT / 'notes' / 'spesa.txt').read_text(encoding='utf-8'))
 
 
 
-## Step 4 — `read_text_file` → MockTTS
+## Step 4 — `read_file` (testo) → MockTTS
 
-Tool JSON per rileggere un file e far stampare il contenuto via MockTTS:
+Un solo tool di lettura per testo e PDF (`name` unico nello schema 3B):
 
-- Schema: `{"tool":"read_text_file","args":{"name":"…"}}` oppure `{"tool":"none","reply":"…"}`.
-- Path risolto in Python (RapidFuzz): basta il nome dal comando (anche senza cartella/estensione).
-- Dopo la lettura il modello deve rispondere con `tool=none` ripetendo il contenuto a voce → `[TTS] …`.
+- Schema: `{"tool":"read_file","args":{"name":"…"}}` oppure `{"tool":"none","reply":"…"}`.
+- Suffix ammessi: `.txt`, `.md`, `.json`, `.pdf`. Path risolto in Python (RapidFuzz).
+- Omonimi stesso stem (es. `spesa.txt` + `spesa.pdf`): preferenza testo; se l’input cita `.pdf` / «punto pdf» → PDF.
+- Dopo la lettura il modello risponde con `tool=none` ripetendo il contenuto a voce → `[TTS] …`.
 - Restano attivi anche `create_text_file` e `append_note`.
 
 Prompt di prova:
@@ -155,21 +156,21 @@ Verifica diretta del tool (senza LLM):
 ```bash
 PYTHONPATH=src:. python -c "
 from sandbox.ollama_fs_lab.tools_fs import (
-    create_text_file, ensure_workspace, read_text_file,
+    create_text_file, ensure_workspace, read_file,
 )
 ensure_workspace()
 print(create_text_file('spesa.txt', 'latte\\npane'))
-print(read_text_file('spesa.txt'))
+print(read_file('spesa.txt'))
 "
 ```
 
 
 
-## Step 6 — `read_pdf` da `inbox/` → Q&A / riassunto
+## Step 6 — `read_file` su PDF (`inbox/`) → Q&A / riassunto
 
-Tool JSON che estrae testo da un PDF (dipendenza `pypdf`) e lo passa al modello:
+Stesso tool `read_file`: se il resolve punta a `.pdf`, estrae testo con `pypdf` e lo passa al modello.
 
-- Schema: `{"tool":"read_pdf","args":{"name":"…"}}` oppure `{"tool":"none","reply":"…"}`.
+- Schema: `{"tool":"read_file","args":{"name":"…"}}` (hint PDF: `sample_lab.pdf` o «punto pdf»).
 - Copia a mano il PDF in `Ollama_test/inbox/` (Windows Desktop).
 - Nome senza cartella (es. `verbale.pdf`) → cerca in `inbox/`, poi in root.
 - Testo lungo: tetto ~8000 caratteri (troncamento segnalato nell’esito).
@@ -194,10 +195,9 @@ Verifica diretta del tool (senza LLM):
 
 ```bash
 PYTHONPATH=src:. python -c "
-from sandbox.ollama_fs_lab.tools_fs import ensure_workspace
-from sandbox.ollama_fs_lab.tools_pdf import read_pdf
+from sandbox.ollama_fs_lab.tools_fs import ensure_workspace, read_file
 ensure_workspace()
-print(read_pdf('sample_lab.pdf')[:500])
+print(read_file('sample_lab.pdf')[:500])
 "
 ```
 
@@ -212,9 +212,9 @@ print(read_pdf('sample_lab.pdf')[:500])
 | 1    | Loop mock chat (no tool) | ok     | da 50 a 120 secondi | molto lento                                                                                            |
 | 2    | `create_text_file`       | ok     | 25-30 secondi       | le latenze chat sono doppie per ogni richiesta. tipo 12+14 o 14+16                                     |
 | 3    | `append_note`            | ok     | 25-30 secondi       | se gli dici di aggiornare "l'ultimo file" si ricorda il nome ma ne crea uno nuovo nella cartella notes |
-| 4    | `read_text_file` → TTS   | ok     | 20 secondi          | sembra ok                                                                                              |
-| 5    | Riassunto da read        |        |                     |                                                                                                        |
-| 6    | `read_pdf` (inbox/)      |        |                     |                                                                                                        |
+| 4    | `read_file` → TTS        | ok     | 20 secondi          | sembra ok                                                                                              |
+| 5    | Riassunto da read_file   |        |                     |                                                                                                        |
+| 6    | `read_file` PDF (inbox/) |        |                     |                                                                                                        |
 
 
 Compilare le righe 1–6 a mano dopo ogni validazione: questa tabella decide se il Direct Path del Master può affidarsi a qwen per FS reale.

@@ -11,8 +11,7 @@ from sandbox.ollama_fs_lab.file_resolver import (
     _number_canonical_key,
     resolve_file_path,
 )
-from sandbox.ollama_fs_lab.tools_fs import append_note, read_text_file
-from sandbox.ollama_fs_lab.tools_pdf import read_pdf
+from sandbox.ollama_fs_lab.tools_fs import append_note, read_file
 
 
 def _write_minimal_pdf(path: Path, line: str = "Verbale lab Ollama") -> None:
@@ -58,11 +57,11 @@ def _write_minimal_pdf(path: Path, line: str = "Verbale lab Ollama") -> None:
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     """Workspace lab finto: notes/spesa.txt + inbox/spesa.pdf (stesso stem)."""
-    # notes/: file testo di riferimento per exact / fuzzy / read_text_file.
+    # notes/: file testo di riferimento per exact / fuzzy / read_file.
     notes = tmp_path / "notes"
     notes.mkdir()
     (notes / "spesa.txt").write_text("latte e pane\n", encoding="utf-8")
-    # inbox/: omonimo PDF per filtro allowed_suffixes e smoke read_pdf.
+    # inbox/: omonimo PDF per filtro allowed_suffixes e smoke hint PDF.
     _write_minimal_pdf(tmp_path / "inbox" / "spesa.pdf")
     return tmp_path
 
@@ -130,38 +129,45 @@ def test_allowed_suffixes_text_skips_pdf_homonym(workspace: Path) -> None:
     assert rel == Path("notes/spesa.txt")
 
 
-def test_tool_smoke_read_text_file_dirty_name(
+def test_tool_smoke_read_file_prefers_text(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """read_text_file con nome sporco STT legge notes/spesa.txt via resolver."""
+    """read_file senza hint PDF preferisce notes/spesa.txt sull'omonimo PDF."""
     # Isolamento: i tool usano WORKSPACE_ROOT importato a module level.
     monkeypatch.setattr(
         "sandbox.ollama_fs_lab.tools_fs.WORKSPACE_ROOT",
         workspace,
     )
     # Nome come lo emetterebbe STT/LLM senza cartella né estensione.
-    out = read_text_file("leggi spesa")
+    out = read_file("leggi spesa")
     assert out.startswith("OK: contenuto di notes/spesa.txt")
     assert "latte e pane" in out
 
 
-def test_tool_smoke_read_pdf_dirty_name(
+@pytest.mark.parametrize(
+    "raw_name",
+    [
+        # Basename con suffix: tipico output LLM dopo STT.
+        "spesa.pdf",
+        # Pronuncia STT: «punto pdf» deve attivare lo stesso hint.
+        "leggi spesa punto pdf",
+    ],
+)
+def test_tool_smoke_read_file_pdf_hint(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
+    raw_name: str,
 ) -> None:
-    """read_pdf con nome sporco risolve inbox/spesa.pdf (non il .txt)."""
-    # Patch sia tools_pdf sia tools_fs: resolve_in_workspace legge WORKSPACE_ROOT FS.
-    monkeypatch.setattr(
-        "sandbox.ollama_fs_lab.tools_pdf.WORKSPACE_ROOT",
-        workspace,
-    )
+    """read_file con hint PDF (.pdf o «punto pdf») → inbox/spesa.pdf, non .txt."""
     monkeypatch.setattr(
         "sandbox.ollama_fs_lab.tools_fs.WORKSPACE_ROOT",
         workspace,
     )
-    out = read_pdf("apri il documento spesa")
-    assert out.startswith("OK: testo estratto da inbox/spesa.pdf")
+    # Hint esplicito: omonimo testo ignorato a favore del PDF.
+    out = read_file(raw_name)
+    assert out.startswith("OK: contenuto di inbox/spesa.pdf")
+    assert "estratto" in out
     assert "Verbale lab Ollama" in out
 
 
