@@ -9,6 +9,7 @@ Solo path e URL fissi: niente email, niente Cursor, niente framework multi-agent
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # Root del repo lavora_e_guida (due livelli sopra sandbox/ollama_fs_lab/config.py).
@@ -29,3 +30,7 @@ OLLAMA_URL = "http://127.0.0.1:11434"
 
 # Modello di lab: tag già pullato e presente in `ollama list` (Step 0).
 OLLAMA_MODEL = "qwen2.5:3b"
+
+# Default cloud per `--llm openai` (override CLI `--model` o env OPENAI_MODEL).
+# Chiave API: OPENAI_API_KEY da ambiente / .env (vedi .env.example).
+OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "").strip() or "gpt-4o-mini"

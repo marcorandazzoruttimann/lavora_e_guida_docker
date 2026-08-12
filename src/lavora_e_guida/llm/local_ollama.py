@@ -12,8 +12,10 @@ from typing import Any
 
 import httpx
 
+from lavora_e_guida.llm.errors import LLMError
 
-class OllamaError(RuntimeError):
+
+class OllamaError(LLMError):
     """Errore di trasporto o payload non valido da Ollama."""
 
 

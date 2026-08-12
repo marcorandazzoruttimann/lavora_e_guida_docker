@@ -5,7 +5,7 @@ Lab separato (Phase 3B+ in pausa) per misurare cosa sa fare `qwen2.5:3b` su crea
 - **Codice**: `sandbox/ollama_fs_lab/` (questo repo)
 - **Dati FS** (`WORKSPACE_ROOT`): `C:\Users\User\Desktop\Ollama_test` → WSL `/mnt/c/Users/User/Desktop/Ollama_test`
 - **Indice RAG** (`INDEX_ROOT`): `lavora_e_guida/ollama_lab/` — SQLite `files.db` + Chroma `chroma/` nel repo Cursor (path indicizzati relativi al data workspace)
-- **LLM**: `LocalOllama` → modello `qwen2.5:3b`
+- **LLM**: default `LocalOllama` → `qwen2.5:3b`; opzionale `--llm openai` → `OpenAIChat` (`gpt-4o-mini` / `OPENAI_MODEL`)
 - **I/O**: MockSTT / MockTTS a terminale (dal Step 1)
 
 ### Due root distinti
@@ -32,7 +32,21 @@ L'indice non vive sotto il Desktop: il data workspace contiene solo dati utente.
 | Workspace Desktop                      | Cartella `Ollama_test` presente e vuota                                   |
 
 
-URL e modello fissati in `[config.py](config.py)`: `OLLAMA_URL`, `OLLAMA_MODEL`.
+URL e modelli in `[config.py](config.py)`: `OLLAMA_URL`, `OLLAMA_MODEL`, `OPENAI_MODEL`.
+
+### Switch provider LLM (Ollama / OpenAI)
+
+Default invariato (Ollama locale). Per test più affidabili via API OpenAI:
+
+```bash
+# chiave da .env o export (vedi .env.example)
+export OPENAI_API_KEY=sk-...
+
+PYTHONPATH=src:. python -m sandbox.ollama_fs_lab --llm openai
+PYTHONPATH=src:. python -m sandbox.ollama_fs_lab --llm openai --model gpt-4o-mini
+```
+
+Override modello anche con `OPENAI_MODEL` in `.env`. Banner stderr: `provider=... modello=...`.
 
 ### Ri-verifica rapida
 

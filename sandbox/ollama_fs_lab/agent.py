@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from lavora_e_guida.audio.interface import BaseSTT, BaseTTS
-from lavora_e_guida.llm.local_ollama import LocalOllama, OllamaError
+from lavora_e_guida.llm.cloud import OpenAIChat
+from lavora_e_guida.llm.errors import LLMError
+from lavora_e_guida.llm.local_ollama import LocalOllama
 
-from sandbox.ollama_fs_lab.config import OLLAMA_MODEL, OLLAMA_URL
+from sandbox.ollama_fs_lab.config import OLLAMA_MODEL, OLLAMA_URL, OPENAI_MODEL
 from sandbox.ollama_fs_lab.tools_fs import (
     FsToolError,
     append_note,
@@ -22,6 +24,7 @@ from sandbox.ollama_fs_lab.tools_fs import (
     read_file,
 )
 from sandbox.ollama_fs_lab.tools_find import FindToolError, find_file
+
 # Schema unico name+content per create/append: meno campi = meno errori sui 3B.
 # Path resolve resta solo in Python; il modello vede solo name/content/reply.
 _SYSTEM_PROMPT = (
@@ -249,18 +252,20 @@ def run_chat_loop(
         for _round in range(_MAX_TOOL_ROUNDS):
             t0 = time.perf_counter()
             try:
-                # format_json: spinge qwen a emettere un oggetto; temperature
+                # format_json: spinge qwen/GPT a emettere un oggetto; temperature
                 # bassa riduce tool inventati / campi extra.
                 raw = llm.chat(
                     messages,
                     format_json=True,
                     options={"temperature": 0.1},
                 )
-            except OllamaError as exc:
+            except LLMError as exc:
                 # Errore parlante: l'utente sente il problema senza stacktrace.
                 # Rimuoviamo l'ultimo user così un retry non duplica il turno.
                 messages.pop()
-                tts.speak(f"Errore Ollama: {exc}")
+                # Ollama resta etichettato "Ollama"; OpenAI (e altri) → "LLM".
+                err_label = "Ollama" if isinstance(llm, LocalOllama) else "LLM"
+                tts.speak(f"Errore {err_label}: {exc}")
                 spoken = True
                 break
             elapsed = time.perf_counter() - t0
@@ -280,8 +285,8 @@ def run_chat_loop(
 
             try:
                 parsed = _parse_agent_json(raw)
-            except OllamaError:
-                # JSON rotto tipico dei 3B: chiediamo una sola retry strutturata.
+            except LLMError:
+                # JSON rotto tipico dei 3B (OllamaError ⊂ LLMError): retry strutturata.
                 messages.append(
                     {
                         "role": "user",
@@ -370,7 +375,29 @@ def run_chat_loop(
     return 0
 
 
-def build_default_llm() -> LocalOllama:
-    """Client LocalOllama puntato a config del lab (URL + modello Step 0)."""
+def build_llm(
+    provider: Literal["ollama", "openai"] = "ollama",
+    model: str | None = None,
+) -> LocalOllama | OpenAIChat:
+    """Factory provider: ollama (default) oppure openai (stesso contratto chat).
+
+    `model` None → OLLAMA_MODEL oppure OPENAI_MODEL (env / default gpt-4o-mini).
+    """
+    if provider == "openai":
+        # Timeout generoso: rete pubblica + eventuale cold start lato API.
+        return OpenAIChat(model=model or OPENAI_MODEL, timeout=120.0)
+
     # Timeout alto: cold start qwen2.5:3b su Ryzen 3 può superare i 5 minuti.
-    return LocalOllama(base_url=OLLAMA_URL, model=OLLAMA_MODEL, timeout=500.0)
+    return LocalOllama(
+        base_url=OLLAMA_URL,
+        model=model or OLLAMA_MODEL,
+        timeout=500.0,
+    )
+
+
+def build_default_llm() -> LocalOllama:
+    """Retrocompat: stesso di `build_llm(\"ollama\")` (URL + modello Step 0)."""
+    # Cast implicito: con provider ollama la factory restituisce sempre LocalOllama.
+    llm = build_llm("ollama")
+    assert isinstance(llm, LocalOllama)
+    return llm
