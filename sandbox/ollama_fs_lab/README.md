@@ -3,9 +3,21 @@
 Lab separato (Phase 3B+ in pausa) per misurare cosa sa fare `qwen2.5:3b` su create/note/read/summary/PDF.
 
 - **Codice**: `sandbox/ollama_fs_lab/` (questo repo)
-- **Dati FS**: solo `C:\Users\User\Desktop\Ollama_test` → WSL `/mnt/c/Users/User/Desktop/Ollama_test`
+- **Dati FS** (`WORKSPACE_ROOT`): `C:\Users\User\Desktop\Ollama_test` → WSL `/mnt/c/Users/User/Desktop/Ollama_test`
+- **Indice RAG** (`INDEX_ROOT`): `lavora_e_guida/ollama_lab/` — SQLite `files.db` + Chroma `chroma/` nel repo Cursor (path indicizzati relativi al data workspace)
 - **LLM**: `LocalOllama` → modello `qwen2.5:3b`
 - **I/O**: MockSTT / MockTTS a terminale (dal Step 1)
+
+### Due root distinti
+
+
+| Concetto       | Path                                  | Ruolo                                                  |
+| -------------- | ------------------------------------- | ------------------------------------------------------ |
+| Data workspace | `WORKSPACE_ROOT` (Desktop)            | File utente: note, PDF, create/read/append             |
+| Indice RAG     | `INDEX_ROOT` (`ollama_lab/` nel repo) | SQLite + Chroma; path in DB relativi al data workspace |
+
+
+L'indice non vive sotto il Desktop: il data workspace contiene solo dati utente.
 
 ## Step 0 — Ollama (completato 2026-08-07)
 
@@ -213,7 +225,7 @@ print(read_file('sample_lab.pdf')[:500])
 | 2    | `create_text_file`       | ok     | 25-30 secondi       | le latenze chat sono doppie per ogni richiesta. tipo 12+14 o 14+16                                     |
 | 3    | `append_note`            | ok     | 25-30 secondi       | se gli dici di aggiornare "l'ultimo file" si ricorda il nome ma ne crea uno nuovo nella cartella notes |
 | 4    | `read_file` → TTS        | ok     | 20 secondi          | sembra ok                                                                                              |
-| 5    | Riassunto da read_file   |        |                     |                                                                                                        |
+| 5    | Riassunto da read_file   | ok     |                     |                                                                                                        |
 | 6    | `read_file` PDF (inbox/) |        |                     |                                                                                                        |
 
 

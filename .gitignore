@@ -38,3 +38,7 @@ Thumbs.db
 # Logs / runtime
 *.log
 logs/
+
+# Indice RAG generato localmente (cartella tracciata via .gitkeep)
+ollama_lab/files.db
+ollama_lab/chroma/

@@ -21,6 +21,7 @@ from sandbox.ollama_fs_lab.tools_fs import (
     create_text_file,
     read_file,
 )
+from sandbox.ollama_fs_lab.tools_find import FindToolError, find_file
 # Schema unico name+content per create/append: meno campi = meno errori sui 3B.
 # Path resolve resta solo in Python; il modello vede solo name/content/reply.
 _SYSTEM_PROMPT = (
@@ -33,6 +34,7 @@ _SYSTEM_PROMPT = (
     '- Aggiorna file: {"tool": "append_note", "args": {"name": "string", '
     '"content": "string"}}\n'
     '- Leggi file: {"tool": "read_file", "args": {"name": "string"}}\n'
+    '- Cerca per contenuto: {"tool": "find_file", "args": {"query": "string"}}\n'
     '- Risposta parlata: {"tool": "none", "reply": "string"}\n\n'
     "REGOLE TASSATIVE:\n"
     "1. Emetti UN SOLO oggetto JSON con UN SOLO tool per risposta.\n"
@@ -58,7 +60,8 @@ _EXIT_WORDS = frozenset({"esci", "exit", "quit"})
 _TOOL_CREATE = "create_text_file"
 _TOOL_APPEND = "append_note"
 _TOOL_READ = "read_file"
-_ALLOWED_TOOLS = frozenset({_TOOL_CREATE, _TOOL_APPEND, _TOOL_READ})
+_TOOL_FIND = "find_file"
+_ALLOWED_TOOLS = frozenset({_TOOL_CREATE, _TOOL_APPEND, _TOOL_READ, _TOOL_FIND})
 
 # Limite round tool per turno utente: evita loop infinito se il modello ripete.
 _MAX_TOOL_ROUNDS = 4
@@ -91,12 +94,21 @@ def _dispatch_tool(tool: str, args: dict[str, Any]) -> str:
             f"Consentiti: {allowed} oppure tool=none."
         )
 
-    # Il caller garantisce già un dict (args validi oppure {}).
-    name = args.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return "ERRORE: args.name deve essere una stringa non vuota (es. spesa.txt)."
-
     try:
+        if tool == _TOOL_FIND:
+            query = args.get("query")
+            if not isinstance(query, str) or not query.strip():
+                return (
+                    "ERRORE: args.query deve essere una stringa non vuota "
+                    "(es. dove ho scritto dei cetrioli)."
+                )
+            return find_file(query)
+
+        # Il caller garantisce già un dict (args validi oppure {}).
+        name = args.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return "ERRORE: args.name deve essere una stringa non vuota (es. spesa.txt)."
+
         if tool == _TOOL_READ:
             # Solo name: testo o PDF; resolve + dispatch pypdf in tools_fs.
             return read_file(name)
@@ -111,8 +123,8 @@ def _dispatch_tool(tool: str, args: dict[str, Any]) -> str:
 
         # Whitelist già filtrata: qui resta solo append_note.
         return append_note(name, content)
-    except FsToolError as exc:
-        # Path traversal / assoluti / file assente: messaggio già in italiano.
+    except (FsToolError, FindToolError) as exc:
+        # Path traversal / assenti / RAG: messaggio già in italiano.
         return f"ERRORE: {exc}"
     except OSError as exc:
         # Disco pieno / permessi WSL→Windows: non propaghiamo stacktrace.
@@ -131,6 +143,19 @@ def _followup_after_tool(tool: str, result: str) -> str:
         "Ora rispondi SOLO con tool none e la conferma o la risposta in reply. "
         f"Non richiamare {tool}."
     )
+
+
+def _print_find_file_to_terminal(result: str) -> bool:
+    """Stampa chunk RAG su stdout (prefisso [RAG]) se find_file ha avuto successo."""
+    if not result.startswith("OK:"):
+        return False
+    if "\n---\n" in result:
+        header, body = result.split("\n---\n", 1)
+        print(f"[RAG] {header}")
+        print(body, end="" if body.endswith("\n") else "\n")
+    else:
+        print(f"[RAG] {result}")
+    return True
 
 
 def _print_read_file_to_terminal(result: str) -> bool:
@@ -168,7 +193,8 @@ def _json_schema_hint() -> str:
         '{"tool":"none","reply":"string"} oppure '
         '{"tool":"create_text_file","args":{"name":"string","content":"string"}} '
         'oppure {"tool":"append_note","args":{"name":"string","content":"string"}} '
-        'oppure {"tool":"read_file","args":{"name":"string"}}.'
+        'oppure {"tool":"read_file","args":{"name":"string"}} '
+        'oppure {"tool":"find_file","args":{"query":"string"}}.'
     )
 
 
@@ -194,8 +220,8 @@ def run_chat_loop(
 
     # Introduzione parlata: un solo tool di lettura (testo + PDF).
     tts.speak(
-        "Lab Ollama FS, step sei: posso creare, aggiornare e leggere file "
-        "testo o PDF sul Desktop. Di' esci per terminare."
+        "Lab Ollama FS: posso creare, aggiornare e leggere file, "
+        "cercare per contenuto con find file, sul Desktop. Di' esci per terminare."
     )
 
     turns = 0
@@ -296,8 +322,12 @@ def run_chat_loop(
                     "content": top_content,
                 }
             args_dict = args if isinstance(args, dict) else {}
-            tool_name_arg = str(args_dict.get("name") or "")
-            tool_key = f"{tool}|{tool_name_arg.strip().casefold()}"
+            # Chiave anti-loop: find_file usa query, gli altri name.
+            if tool == _TOOL_FIND:
+                tool_key = f"{tool}|{str(args_dict.get('query') or '').strip().casefold()}"
+            else:
+                tool_name_arg = str(args_dict.get("name") or "")
+                tool_key = f"{tool}|{tool_name_arg.strip().casefold()}"
             # Anti-loop: i 3B ripetono read_file dopo Esito OK; Python interrompe.
             if prev_tool_key is not None and tool_key == prev_tool_key:
                 messages.append(
@@ -314,9 +344,11 @@ def run_chat_loop(
 
             result = _dispatch_tool(tool, args_dict)
 
-            # read_file: stampa subito il corpo a terminale (non dipende dal TTS).
+            # read_file / find_file: stampa subito il corpo a terminale.
             if tool == _TOOL_READ:
                 _print_read_file_to_terminal(result)
+            elif tool == _TOOL_FIND:
+                _print_find_file_to_terminal(result)
 
             # Ruolo user con esito + vincolo tool=none (anti-ripetizione 3B).
             prev_tool_key = tool_key

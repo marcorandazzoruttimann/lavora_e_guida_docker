@@ -240,3 +240,18 @@ def test_resolve_progetto_number_variants(workspace_progetto: Path, stt: str) ->
 def test_clean_stt_number_words_to_digits() -> None:
     """Dopo stopword, 'zero tre' diventa chiave numerica canonica."""
     assert _clean_stt_input("leggi progetto zero tre") == "progetto_3"
+
+
+def test_resolve_does_not_crash_on_extra_dirs(tmp_path: Path) -> None:
+    """Sotto-cartelle arbitrarie non rompono lo scan stem (sanity check)."""
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "marker.txt").write_text("ok\n", encoding="utf-8")
+    # Cartella extra con file omonimo: entrambi entrano nella mappa, il resolver sceglie.
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    (extra / "marker.txt").write_text("altro\n", encoding="utf-8")
+    rel = resolve_file_path("marker", tmp_path)
+    # Uno dei due viene scelto (entrambi validi): basta che non sia None.
+    assert rel is not None
+    assert rel.name == "marker.txt"

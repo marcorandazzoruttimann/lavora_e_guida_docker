@@ -18,6 +18,7 @@ from pathlib import Path
 
 from rapidfuzz import fuzz, process
 
+
 # Stopword di comando/STT italiano: rumore da togliere prima del match sullo stem.
 # Ordine lungo→corto nelle frasi multi-token gestito a parte (estensioni pronunciate).
 # Include verbi di lettura e di append_note (“aggiungi/aggiorna … spesa”).

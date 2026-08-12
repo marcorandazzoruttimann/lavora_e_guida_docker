@@ -8,11 +8,14 @@ Ogni path utente è risolto e verificato: fuori dal root → errore parlante, ni
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
-from sandbox.ollama_fs_lab.config import WORKSPACE_ROOT
+from sandbox.ollama_fs_lab.config import INDEX_ROOT, WORKSPACE_ROOT
 from sandbox.ollama_fs_lab.file_resolver import resolve_file_path
+
+logger = logging.getLogger(__name__)
 
 # Suffix leggibili da `read_file`: testo UTF-8 + PDF (estrazione pypdf).
 _READ_FILE_SUFFIXES: frozenset[str] = frozenset({".txt", ".md", ".json", ".pdf"})
@@ -33,6 +36,19 @@ _PDF_HINT_PRONUNCIATION = re.compile(
 
 class FsToolError(ValueError):
     """Errore di contratto tool FS (path, argomenti): messaggio adatto al TTS."""
+
+
+def _sync_index_after_write(rel_posix: str) -> None:
+    """Aggiorna indice RAG per un solo file dopo create/append (best-effort).
+
+    Non fallisce il tool FS se Chroma/SQLite non disponibili: log warning.
+    """
+    try:
+        from sandbox.ollama_fs_lab.rag.index_sync import upsert_indexed_file
+
+        upsert_indexed_file(WORKSPACE_ROOT, rel_posix, index_root=INDEX_ROOT)
+    except Exception as exc:  # noqa: BLE001 — indice opzionale, FS deve restare ok
+        logger.warning("sync RAG post-scrittura fallita per %s: %s", rel_posix, exc)
 
 
 def ensure_workspace() -> Path:
@@ -137,8 +153,11 @@ def create_text_file(name: str, content: str) -> str:
 
     # Path relativo al root: utile in TTS e per verificare a occhio su Windows.
     rel = target.relative_to(WORKSPACE_ROOT.resolve())
+    rel_posix = rel.as_posix()
+    # Indice semantico: find_file vede subito il nuovo/aggiornato contenuto.
+    _sync_index_after_write(rel_posix)
     return (
-        f"OK: creato file {rel.as_posix()} "
+        f"OK: creato file {rel_posix} "
         f"({len(text)} caratteri) nel workspace Ollama_test."
     )
 
@@ -211,8 +230,11 @@ def append_note(name: str, content: str) -> str:
         action = "creata"
 
     out_rel = target.relative_to(root)
+    rel_posix = out_rel.as_posix()
+    # Re-embed dopo append: hash cambia, find_file resta allineato.
+    _sync_index_after_write(rel_posix)
     return (
-        f"OK: nota {action} {out_rel.as_posix()} "
+        f"OK: nota {action} {rel_posix} "
         f"(+{len(chunk)} caratteri) nel workspace Ollama_test."
     )
 
