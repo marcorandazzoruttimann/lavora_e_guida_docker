@@ -1,7 +1,7 @@
 """Entry: `PYTHONPATH=src:. python -m sandbox.ollama_fs_lab`.
 
-Avvia il loop MockSTT/TTS + LLM (Ollama o OpenAI) con create/append/read_file.
-Switch: `--llm ollama|openai` (default ollama) e `--model` opzionale.
+Avvia il loop MockSTT/TTS + LLM (Ollama o Gemini) con create/append/read_file.
+Switch: `--llm ollama|gemini` (default ollama) e `--model` opzionale.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Literal
 from dotenv import load_dotenv
 
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
-from lavora_e_guida.llm.cloud import OpenAIChat
+from lavora_e_guida.llm.cloud import GeminiChat
 from lavora_e_guida.llm.local_ollama import LocalOllama
 
 from sandbox.ollama_fs_lab.agent import build_llm, run_chat_loop
@@ -32,15 +32,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # Default ollama: stessi comandi di prima senza --llm.
     parser.add_argument(
         "--llm",
-        choices=("ollama", "openai"),
+        choices=("ollama", "gemini"),
         default="ollama",
         help="Provider LLM (default: ollama).",
     )
-    # None → factory usa OLLAMA_MODEL / OPENAI_MODEL da config.
+    # None → factory usa OLLAMA_MODEL / GEMINI_MODEL da config.
     parser.add_argument(
         "--model",
         default=None,
-        help="Override modello (Ollama tag o id OpenAI).",
+        help="Override modello (Ollama tag o id Gemini).",
     )
     return parser.parse_args(argv)
 
@@ -72,21 +72,21 @@ def _startup_ollama(llm: LocalOllama, model: str) -> None:
         raise SystemExit(1)
 
 
-def _startup_openai(llm: OpenAIChat) -> None:
+def _startup_gemini(llm: GeminiChat) -> None:
     """Chiave presente + ping GET /models; SystemExit(1) se auth/rete falliscono."""
     # Fail early: senza chiave il primo chat darebbe 401 poco chiaro.
-    if not (os.environ.get("OPENAI_API_KEY") or "").strip():
+    if not (os.environ.get("GEMINI_API_KEY") or "").strip():
         print(
-            "OPENAI_API_KEY assente. Imposta la variabile (o .env) e riprova. "
-            "Esempio: export OPENAI_API_KEY=sk-...",
+            "GEMINI_API_KEY assente. Imposta la variabile (o .env) e riprova. "
+            "Esempio: export GEMINI_API_KEY=...",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
     if not llm.ping():
         print(
-            "OpenAI non raggiungibile o chiave non valida "
-            "(GET /v1/models fallito). Verifica rete e OPENAI_API_KEY.",
+            "Gemini non raggiungibile o chiave non valida "
+            "(GET /v1beta/models fallito). Verifica rete e GEMINI_API_KEY.",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -94,19 +94,19 @@ def _startup_openai(llm: OpenAIChat) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     """Parse CLI, ping provider, prepara workspace Desktop, loop fino a 'esci'."""
-    # .env in cwd/repo: OPENAI_API_KEY senza export manuale in shell.
+    # .env in cwd/repo: GEMINI_API_KEY senza export manuale in shell.
     load_dotenv()
 
     args = _parse_args(argv)
-    provider: Literal["ollama", "openai"] = args.llm
+    provider: Literal["ollama", "gemini"] = args.llm
 
     # Client di proprietà di questo processo: lo chiudiamo sempre in finally.
     llm = build_llm(provider, model=args.model)
     try:
-        if provider == "openai":
-            # OpenAIChat: assert per type-checker + check auth/rete.
-            assert isinstance(llm, OpenAIChat)
-            _startup_openai(llm)
+        if provider == "gemini":
+            # GeminiChat: assert per type-checker + check auth/rete.
+            assert isinstance(llm, GeminiChat)
+            _startup_gemini(llm)
         else:
             assert isinstance(llm, LocalOllama)
             _startup_ollama(llm, model=llm.model)

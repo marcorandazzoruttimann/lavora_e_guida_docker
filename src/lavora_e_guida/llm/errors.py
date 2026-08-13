@@ -1,4 +1,4 @@
-"""Errori LLM condivisi (Ollama locale e OpenAI cloud).
+"""Errori LLM condivisi (Ollama locale e Gemini cloud).
 
 Una sola gerarchia permette al loop del lab (e al classifier) di catturare
 `LLMError` senza dipendere dal provider concreto.

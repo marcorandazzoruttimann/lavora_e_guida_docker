@@ -12,11 +12,11 @@ import time
 from typing import Any, Literal, Protocol
 
 from lavora_e_guida.audio.interface import BaseSTT, BaseTTS
-from lavora_e_guida.llm.cloud import OpenAIChat
+from lavora_e_guida.llm.cloud import GeminiChat
 from lavora_e_guida.llm.errors import LLMError
 from lavora_e_guida.llm.local_ollama import LocalOllama
 
-from sandbox.ollama_fs_lab.config import OLLAMA_MODEL, OLLAMA_URL, OPENAI_MODEL
+from sandbox.ollama_fs_lab.config import GEMINI_MODEL, OLLAMA_MODEL, OLLAMA_URL
 from sandbox.ollama_fs_lab.tools_fs import (
     FsToolError,
     append_note,
@@ -263,7 +263,7 @@ def run_chat_loop(
                 # Errore parlante: l'utente sente il problema senza stacktrace.
                 # Rimuoviamo l'ultimo user così un retry non duplica il turno.
                 messages.pop()
-                # Ollama resta etichettato "Ollama"; OpenAI (e altri) → "LLM".
+                # Ollama resta etichettato "Ollama"; Gemini (e altri) → "LLM".
                 err_label = "Ollama" if isinstance(llm, LocalOllama) else "LLM"
                 tts.speak(f"Errore {err_label}: {exc}")
                 spoken = True
@@ -376,16 +376,16 @@ def run_chat_loop(
 
 
 def build_llm(
-    provider: Literal["ollama", "openai"] = "ollama",
+    provider: Literal["ollama", "gemini"] = "ollama",
     model: str | None = None,
-) -> LocalOllama | OpenAIChat:
-    """Factory provider: ollama (default) oppure openai (stesso contratto chat).
+) -> LocalOllama | GeminiChat:
+    """Factory provider: ollama (default) oppure gemini (stesso contratto chat).
 
-    `model` None → OLLAMA_MODEL oppure OPENAI_MODEL (env / default gpt-4o-mini).
+    `model` None → OLLAMA_MODEL oppure GEMINI_MODEL (env / default gemini-3.5-flash).
     """
-    if provider == "openai":
+    if provider == "gemini":
         # Timeout generoso: rete pubblica + eventuale cold start lato API.
-        return OpenAIChat(model=model or OPENAI_MODEL, timeout=120.0)
+        return GeminiChat(model=model or GEMINI_MODEL, timeout=120.0)
 
     # Timeout alto: cold start qwen2.5:3b su Ryzen 3 può superare i 5 minuti.
     return LocalOllama(

@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     )
     windows_audio_port: int = 8765
     anthropic_api_key: str | None = None
-    openai_api_key: str | None = None
+    gemini_api_key: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

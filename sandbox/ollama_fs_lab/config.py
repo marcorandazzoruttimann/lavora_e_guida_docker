@@ -31,6 +31,6 @@ OLLAMA_URL = "http://127.0.0.1:11434"
 # Modello di lab: tag già pullato e presente in `ollama list` (Step 0).
 OLLAMA_MODEL = "qwen2.5:3b"
 
-# Default cloud per `--llm openai` (override CLI `--model` o env OPENAI_MODEL).
-# Chiave API: OPENAI_API_KEY da ambiente / .env (vedi .env.example).
-OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "").strip() or "gpt-4o-mini"
+# Default cloud per `--llm gemini` (override CLI `--model` o env GEMINI_MODEL).
+# Chiave API: GEMINI_API_KEY da ambiente / .env (vedi .env.example).
+GEMINI_MODEL = (os.environ.get("GEMINI_MODEL") or "").strip() or "gemini-3.5-flash"
