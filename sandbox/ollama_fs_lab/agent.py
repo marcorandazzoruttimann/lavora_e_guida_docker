@@ -9,14 +9,22 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from lavora_e_guida.audio.interface import BaseSTT, BaseTTS
 from lavora_e_guida.llm.cloud import GeminiChat
 from lavora_e_guida.llm.errors import LLMError
 from lavora_e_guida.llm.local_ollama import LocalOllama
+from lavora_e_guida.llm.usage import TokenUsage
 
-from sandbox.ollama_fs_lab.config import GEMINI_MODEL, OLLAMA_MODEL, OLLAMA_URL
+from sandbox.ollama_fs_lab.config import (
+    GEMINI_MODEL,
+    OLLAMA_MODEL,
+    OLLAMA_URL,
+    TELEMETRY_DB,
+)
+from sandbox.ollama_fs_lab.telemetry import TelemetryDB, utc_now_iso
 from sandbox.ollama_fs_lab.tools_fs import (
     FsToolError,
     append_note,
@@ -201,6 +209,28 @@ def _json_schema_hint() -> str:
     )
 
 
+def _record_stt_turn(
+    store: TelemetryDB,
+    *,
+    started_at: str,
+    usage: TokenUsage,
+    tts_response: str,
+) -> None:
+    """Insert riga `stt_requests` dopo lo speak finale del turno.
+
+    Contratto: non alza eccezioni (lo store logga e ritorna False).
+    Un turno con N round tool → una riga, token già sommati in `usage`.
+    """
+    # ended_at dopo tts.speak: include la durata della reply parlata.
+    store.insert_stt_request(
+        started_at=started_at,
+        ended_at=utc_now_iso(),
+        token_input=usage.prompt_tokens,
+        token_output=usage.completion_tokens,
+        tts_response=tts_response,
+    )
+
+
 def run_chat_loop(
     stt: BaseSTT,
     tts: BaseTTS,
@@ -210,11 +240,15 @@ def run_chat_loop(
     max_turns: int | None = None,
     # Se True stampa su stderr la latenza warm di ogni chat (misura a occhio).
     report_latency: bool = True,
+    # Path file SQLite; None → TELEMETRY_DB (INDEX_ROOT / telemetry.db).
+    # I test passano tmp_path / "telemetry.db" per non toccare il DB reale.
+    telemetry_db: Path | None = None,
 ) -> int:
     """Un turno = listen → (tool JSON)* → reply TTS; ritorna 0 in uscita normale.
 
     Side-effect: storia conversazione append-only; FS/PDF se il modello chiama
-    i tool; TTS stampa ogni reply finale (contenuto, Q&A o riassunto).
+    i tool; TTS stampa ogni reply finale (contenuto, Q&A o riassunto);
+    una riga telemetria per turno vocale valido (non intro / riga vuota / esci).
     """
     # Messaggi Ollama: il system resta fisso in testa per tutto il loop.
     messages: list[dict[str, str]] = [
@@ -222,17 +256,47 @@ def run_chat_loop(
     ]
 
     # Introduzione parlata: un solo tool di lettura (testo + PDF).
+    # Non è una reply LLM: nessuna riga telemetria.
     tts.speak(
         "Lab Ollama FS: posso creare, aggiornare e leggere file, "
         "cercare per contenuto con find file, sul Desktop. Di' esci per terminare."
     )
 
+    # Lazy connect: il file SQLite nasce al primo insert, non all'avvio.
+    store = TelemetryDB(telemetry_db if telemetry_db is not None else TELEMETRY_DB)
+    try:
+        return _run_chat_loop_body(
+            stt,
+            tts,
+            llm,
+            messages,
+            store,
+            max_turns=max_turns,
+            report_latency=report_latency,
+        )
+    finally:
+        # Chiude SQLite anche su return anticipato (esci / EOF).
+        store.close()
+
+
+def _run_chat_loop_body(
+    stt: BaseSTT,
+    tts: BaseTTS,
+    llm: SupportsChat,
+    messages: list[dict[str, str]],
+    store: TelemetryDB,
+    *,
+    max_turns: int | None,
+    report_latency: bool,
+) -> int:
+    """Corpo del loop: listen → chat/tool → speak + insert telemetria."""
     turns = 0
     while max_turns is None or turns < max_turns:
         # --- LISTENING: una riga da MockSTT = una “frase vocale” -----------
         user_text = stt.listen()
 
         # EOF / riga vuota → uscita soft (Ctrl+D o Enter a vuoto).
+        # Nessuna riga telemetria: non c'è stata una richiesta LLM.
         if not user_text.strip():
             tts.speak("Nessun input. Uscita.")
             return 0
@@ -241,6 +305,10 @@ def run_chat_loop(
         if user_text.strip().casefold() in _EXIT_WORDS:
             tts.speak("Arrivederci.")
             return 0
+
+        # Transcript valido: parte il turno telemetria (clock + token a zero).
+        started_at = utc_now_iso()
+        usage = TokenUsage()
 
         # Aggiungiamo l'utente alla storia prima della chiamata HTTP.
         messages.append({"role": "user", "content": user_text.strip()})
@@ -265,10 +333,20 @@ def run_chat_loop(
                 messages.pop()
                 # Ollama resta etichettato "Ollama"; Gemini (e altri) → "LLM".
                 err_label = "Ollama" if isinstance(llm, LocalOllama) else "LLM"
-                tts.speak(f"Errore {err_label}: {exc}")
+                spoken_text = f"Errore {err_label}: {exc}"
+                tts.speak(spoken_text)
+                _record_stt_turn(
+                    store,
+                    started_at=started_at,
+                    usage=usage,
+                    tts_response=spoken_text,
+                )
                 spoken = True
                 break
             elapsed = time.perf_counter() - t0
+
+            # chat() ok: sommiamo last_usage (assente sul mock → 0+0).
+            usage = usage + getattr(llm, "last_usage", TokenUsage())
 
             if report_latency:
                 print(f"[lab] latenza chat: {elapsed:.2f}s", file=sys.stderr)
@@ -276,7 +354,14 @@ def run_chat_loop(
             raw = (raw or "").strip()
             if not raw:
                 messages.pop()
-                tts.speak("Il modello non ha risposto. Riprova.")
+                spoken_text = "Il modello non ha risposto. Riprova."
+                tts.speak(spoken_text)
+                _record_stt_turn(
+                    store,
+                    started_at=started_at,
+                    usage=usage,
+                    tts_response=spoken_text,
+                )
                 spoken = True
                 break
 
@@ -313,6 +398,12 @@ def run_chat_loop(
                     )
                     continue
                 tts.speak(reply_s)
+                _record_stt_turn(
+                    store,
+                    started_at=started_at,
+                    usage=usage,
+                    tts_response=reply_s,
+                )
                 spoken = True
                 break
 
@@ -366,8 +457,15 @@ def run_chat_loop(
 
         if not spoken:
             # Troppi round senza reply: feedback chiaro, non silenzio.
-            tts.speak(
+            spoken_text = (
                 "Non sono riuscito a completare l'azione in questo turno. Riprova."
+            )
+            tts.speak(spoken_text)
+            _record_stt_turn(
+                store,
+                started_at=started_at,
+                usage=usage,
+                tts_response=spoken_text,
             )
 
         turns += 1

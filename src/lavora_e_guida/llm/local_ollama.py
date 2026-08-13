@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from lavora_e_guida.llm.errors import LLMError
+from lavora_e_guida.llm.usage import TokenUsage, parse_ollama_usage
 
 
 class OllamaError(LLMError):
@@ -24,6 +25,7 @@ class LocalOllama:
 
     Contratto: `generate` / `chat` restituiscono testo plain; il parsing
     JSON dell'intent resta in `routing.intent` (prompt corto + estrazione).
+    Side-effect: `last_usage` dopo ogni generate/chat (campi assenti → 0).
     """
 
     def __init__(
@@ -43,6 +45,8 @@ class LocalOllama:
         # Client iniettabile → MockTransport nei test senza rete reale.
         self._client = client
         self._owns_client = client is None
+        # Telemetria: ultimo conteggio token; 0 finché non arriva un payload.
+        self.last_usage = TokenUsage()
 
     def _get_client(self) -> httpx.Client:
         # Lazy: creiamo il client solo al primo uso (import non apre socket).
@@ -112,6 +116,8 @@ class LocalOllama:
             raise OllamaError(f"generate fallita: {exc}") from exc
 
         data = response.json()
+        # Side-effect telemetria: last_usage senza cambiare il return str.
+        self.last_usage = parse_ollama_usage(data)
         text = data.get("response")
         if not isinstance(text, str):
             raise OllamaError(f"campo response assente o non stringa: {data!r}")
@@ -143,6 +149,8 @@ class LocalOllama:
             raise OllamaError(f"chat fallita: {exc}") from exc
 
         data = response.json()
+        # Stesso contratto di generate: token sul payload, testo in return.
+        self.last_usage = parse_ollama_usage(data)
         message = data.get("message") or {}
         content = message.get("content")
         if not isinstance(content, str):

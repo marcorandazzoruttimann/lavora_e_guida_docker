@@ -15,6 +15,7 @@ from urllib.parse import quote
 import httpx
 
 from lavora_e_guida.llm.errors import LLMError
+from lavora_e_guida.llm.usage import TokenUsage, parse_gemini_usage
 
 # Endpoint pubblico Google AI Studio (v1beta).
 _DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
@@ -160,6 +161,7 @@ class GeminiChat:
 
     Contratto allineato a `LocalOllama.chat`: restituisce testo plain
     (parts concatenate); il parsing JSON resta nel chiamante.
+    Side-effect: `last_usage` dopo ogni chat (campi assenti → 0).
     """
 
     def __init__(
@@ -184,6 +186,8 @@ class GeminiChat:
         # Client iniettabile → MockTransport nei test senza rete reale.
         self._client = client
         self._owns_client = client is None
+        # Telemetria: ultimo conteggio token; 0 finché non arriva un payload.
+        self.last_usage = TokenUsage()
 
     def _auth_headers(self) -> dict[str, str]:
         # Fail early: senza chiave ogni chiamata 401/403; messaggio chiaro al lab.
@@ -254,6 +258,8 @@ class GeminiChat:
         data = response.json()
         if not isinstance(data, dict):
             raise GeminiError(f"risposta non-oggetto JSON: {data!r}")
+        # Side-effect telemetria: last_usage senza cambiare il return str.
+        self.last_usage = parse_gemini_usage(data)
         return _extract_candidate_text(data)
 
 

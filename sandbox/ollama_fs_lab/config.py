@@ -3,6 +3,7 @@
 Due root distinti:
 - WORKSPACE_ROOT: file utente (note, PDF, create/read/append) sul Desktop Windows.
 - INDEX_ROOT: SQLite + Chroma nel progetto Cursor (path indicizzati restano relativi al data workspace).
+  Telemetria token STT: `TELEMETRY_DB` = INDEX_ROOT / telemetry.db (file dedicato, non files.db).
 
 Solo path e URL fissi: niente email, niente Cursor, niente framework multi-agente.
 """
@@ -23,6 +24,9 @@ WORKSPACE_ROOT = Path("/mnt/c/Users/User/Desktop/Ollama_test")
 # Indice RAG persistente nel progetto (non sul Desktop).
 # Contiene files.db (metadati) e chroma/ (embedding); i path in DB restano relativi a WORKSPACE_ROOT.
 INDEX_ROOT = PROJECT_ROOT / "ollama_lab"
+
+# Telemetria token per turno STT: SQLite dedicato, separato dall'indice RAG.
+TELEMETRY_DB = INDEX_ROOT / "telemetry.db"
 
 # Daemon verificato in Step 0: Ollama gira in WSL su loopback, non sull'host Windows.
 # (Host da /etc/resolv.conf:11434 non risponde; processo `ollama serve` in WSL.)

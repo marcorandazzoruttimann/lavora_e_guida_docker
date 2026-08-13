@@ -41,4 +41,5 @@ logs/
 
 # Indice RAG generato localmente (cartella tracciata via .gitkeep)
 ollama_lab/files.db
+ollama_lab/telemetry.db
 ollama_lab/chroma/
