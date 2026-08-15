@@ -9,11 +9,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from sandbox.ollama_fs_lab.config import INDEX_ROOT, WORKSPACE_ROOT
-from sandbox.ollama_fs_lab.rag.chroma_store import ChromaStore
-from sandbox.ollama_fs_lab.rag.index_db import db_path
-from sandbox.ollama_fs_lab.rag.index_sync import sync_workspace_index
-from sandbox.ollama_fs_lab.tools_fs import FsToolError
+from lavora_e_guida.config import INDEX_ROOT, WORKSPACE_ROOT
+from lavora_e_guida.rag.chroma_store import ChromaStore
+from lavora_e_guida.rag.index_db import db_path
+from lavora_e_guida.rag.index_sync import sync_workspace_index
+from lavora_e_guida.tools.fs import FsToolError
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ def find_file(
     except ImportError as exc:
         raise FindToolError(
             "chromadb non installato: esegui "
-            '`pip install -e ".[lab]"` dalla root del repo.'
+            "`pip install -e .` dalla root del repo."
         ) from exc
 
     if not hits:

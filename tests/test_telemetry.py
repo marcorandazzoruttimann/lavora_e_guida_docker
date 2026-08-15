@@ -6,6 +6,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
+from lavora_e_guida.agent import run_chat_loop
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
 from lavora_e_guida.llm.errors import LLMError
 from lavora_e_guida.llm.usage import (
@@ -13,9 +14,7 @@ from lavora_e_guida.llm.usage import (
     parse_gemini_usage,
     parse_ollama_usage,
 )
-from sandbox.ollama_fs_lab.agent import run_chat_loop
-from sandbox.ollama_fs_lab.telemetry import TelemetryDB, db_path
-
+from lavora_e_guida.telemetry import TelemetryDB, db_path
 
 # ---------------------------------------------------------------------------
 # Parser Ollama / Gemini

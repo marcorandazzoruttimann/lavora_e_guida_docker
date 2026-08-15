@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sandbox.ollama_fs_lab.rag.index_db import (
+from lavora_e_guida.rag.index_db import (
     LEGACY_WORKSPACE_INDEX_NAMES,
     ensure_index_dir,
     log_legacy_workspace_index_hint,

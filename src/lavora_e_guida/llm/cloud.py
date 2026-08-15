@@ -1,6 +1,6 @@
 """Client HTTP verso Google Gemini generateContent (senza SDK ufficiale).
 
-Stesso contratto di `LocalOllama` usato dal lab (`chat` / `close` / `ping`):
+Stesso contratto di `LocalOllama` usato dal loop vocale (`chat` / `close` / `ping`):
 il loop `SupportsChat` può scambiare provider senza cambiare il protocollo.
 Auth: header `x-goog-api-key` da `GEMINI_API_KEY` o argomento esplicito.
 """
@@ -19,7 +19,7 @@ from lavora_e_guida.llm.usage import TokenUsage, parse_gemini_usage
 
 # Endpoint pubblico Google AI Studio (v1beta).
 _DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-# Default economico e veloce per tool-calling JSON nel sandbox lab.
+# Default economico e veloce per tool-calling JSON nel loop vocale.
 _DEFAULT_MODEL = "gemini-3.5-flash"
 
 

@@ -8,8 +8,8 @@ import pytest
 
 pytest.importorskip("chromadb")
 
-from sandbox.ollama_fs_lab.rag.index_sync import sync_workspace_index
-from sandbox.ollama_fs_lab.tools_find import FindToolError, find_file
+from lavora_e_guida.rag.index_sync import sync_workspace_index
+from lavora_e_guida.tools.find import FindToolError, find_file
 
 
 def _seed_two_notes(data_ws: Path, index_root: Path) -> None:
@@ -46,7 +46,7 @@ def test_find_file_returns_path_and_chunk(dual_paths: tuple[Path, Path]) -> None
 
     assert out.startswith("OK: trovato notes/spesa.txt")
     assert "---" in out
-    header, chunk_body = out.split("\n---\n", 1)
+    _header, chunk_body = out.split("\n---\n", 1)
     chunk_text = chunk_body.split("\nAltri file:", 1)[0]
     assert "cetrioli" in chunk_text.lower()
     assert "vacanza" not in chunk_text.lower()

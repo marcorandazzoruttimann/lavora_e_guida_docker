@@ -1,4 +1,4 @@
-"""Local and cloud LLM clients (Phase 2 / 4)."""
+"""Client LLM locali (Ollama) e cloud (Gemini)."""
 
 from lavora_e_guida.llm.cloud import CloudLLM, GeminiChat, GeminiError
 from lavora_e_guida.llm.errors import LLMError

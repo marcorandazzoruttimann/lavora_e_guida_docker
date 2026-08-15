@@ -1,4 +1,4 @@
-"""Client HTTP verso Ollama locale (Phase 2).
+"""Client HTTP verso Ollama locale.
 
 Un solo modello alla volta per vincoli RAM (Ryzen 3 / ~4–12 Gi).
 Niente SDK ufficiale: `httpx` su `/api/chat` e `/api/generate` così

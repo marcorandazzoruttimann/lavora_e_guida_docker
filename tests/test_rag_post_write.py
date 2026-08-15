@@ -8,14 +8,14 @@ import pytest
 
 pytest.importorskip("chromadb")
 
-from sandbox.ollama_fs_lab.rag.index_db import IndexDB
-from sandbox.ollama_fs_lab.tools_fs import append_note, create_text_file
+from lavora_e_guida.rag.index_db import IndexDB
+from lavora_e_guida.tools.fs import append_note, create_text_file
 
 
 @pytest.fixture
 def workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Reindirizza WORKSPACE_ROOT e INDEX_ROOT al tmp_path per i test FS."""
-    import sandbox.ollama_fs_lab.tools_fs as tools_fs
+    import lavora_e_guida.tools.fs as tools_fs
 
     # Data workspace: dove i tool creano i file.
     data_ws = tmp_path / "data"

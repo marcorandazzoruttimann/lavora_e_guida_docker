@@ -17,10 +17,10 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sandbox.ollama_fs_lab.config import INDEX_ROOT
-from sandbox.ollama_fs_lab.rag.chroma_store import ChromaStore
-from sandbox.ollama_fs_lab.rag.chunking import chunk_id_for, split_text
-from sandbox.ollama_fs_lab.rag.index_db import (
+from lavora_e_guida.config import INDEX_ROOT
+from lavora_e_guida.rag.chroma_store import ChromaStore
+from lavora_e_guida.rag.chunking import chunk_id_for, split_text
+from lavora_e_guida.rag.index_db import (
     ChunkRecord,
     IndexDB,
     log_legacy_workspace_index_hint,

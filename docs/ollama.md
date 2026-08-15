@@ -1,9 +1,9 @@
-# Setup Ollama (Phase 2.1)
+# Ollama e avvio vocale
 
-## Dove gira
+## Dove gira il daemon
 
 | Opzione | URL tipico | Note |
-|---------|------------|------|
+| --- | --- | --- |
 | **WSL2 (scelta attuale)** | `http://127.0.0.1:11434` | Install con `curl -fsSL https://ollama.com/install.sh \| sh` (serve `zstd`) |
 | **Host Windows** | `http://<WINDOWS_HOST>:11434` | Esporre Ollama sulla LAN/WSL; in `.env` impostare `OLLAMA_BASE_URL` |
 
@@ -24,24 +24,47 @@ Verifica:
 
 ```bash
 curl -sS http://127.0.0.1:11434/api/tags | python3 -m json.tool
+ollama list
 ```
+
+Se il ping fallisce: avviare il daemon in WSL con `ollama serve` (non confondere con Ollama su Windows). L'host Windows `:11434` in questo ambiente non è raggiungibile.
 
 ## Variabili `.env`
 
 ```env
 OLLAMA_MODEL=qwen2.5:3b
 # OLLAMA_BASE_URL=http://127.0.0.1:11434
+AUDIO_DRIVER=mock
+# WORKSPACE_ROOT=/mnt/c/Users/User/Desktop/Ollama_test
+# INDEX_ROOT=   # default: <repo>/ollama_lab
+# GEMINI_API_KEY=
+# GEMINI_MODEL=gemini-3.5-flash
 ```
 
 Se WSL ha ~5 Gi RAM e `qwen2.5:3b` provoca swap pesante, usare `gemma2:2b`.
 
-## Benchmark intent
+## Avvio
 
 ```bash
-.venv/bin/python scripts/bench_ollama_intent.py
+# dalla root del repo, venv attivo
+lavora-e-guida
+# oppure
+python -m lavora_e_guida
+
+# Gemini (chiave da .env)
+lavora-e-guida --llm gemini
+lavora-e-guida --llm gemini --model gemini-3.5-flash
 ```
 
-Scrive `docs/bench_ollama_intent.json` e stampa una raccomandazione. Aggiornare `OLLAMA_MODEL` solo dopo review.
+Banner su stderr: `provider=… modello=… data=… index=…`. Digiti la frase dopo `Tu (mock STT)>`; la risposta compare come `[TTS] …`. Uscita: `esci` / `exit` / `quit`, Enter a vuoto, Ctrl+D.
+
+Smoke non interattivo:
+
+```bash
+printf 'Ciao, rispondi in una frase.\nesci\n' | lavora-e-guida
+```
+
+Tool disponibili (JSON, un tool per turno): `create_text_file`, `append_note`, `read_file` (testo + PDF), `find_file` (RAG). All'avvio `ensure_workspace()` crea `notes/` e `inbox/` sotto `WORKSPACE_ROOT`.
 
 ## Port mirror (Host → WSL)
 

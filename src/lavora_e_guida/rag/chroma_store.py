@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sandbox.ollama_fs_lab.rag.index_db import ensure_index_dir
+from lavora_e_guida.rag.index_db import ensure_index_dir
 
 # Sotto-cartella Chroma dentro INDEX_ROOT (separata da files.db).
 CHROMA_DIRNAME = "chroma"
@@ -63,7 +63,7 @@ class ChromaStore:
         except ImportError as exc:
             raise ImportError(
                 "chromadb non installato: esegui "
-                '`pip install -e ".[lab]"` dalla root del repo.'
+                "`pip install -e .` dalla root del repo."
             ) from exc
 
         # Directory persist: ONNX/embedding cache vivono qui col DB Chroma.

@@ -8,9 +8,9 @@ import pytest
 
 chromadb = pytest.importorskip("chromadb")
 
-from sandbox.ollama_fs_lab.rag.chroma_store import ChromaStore
-from sandbox.ollama_fs_lab.rag.index_db import IndexDB, db_path
-from sandbox.ollama_fs_lab.rag.index_sync import (
+from lavora_e_guida.rag.chroma_store import ChromaStore
+from lavora_e_guida.rag.index_db import IndexDB, db_path
+from lavora_e_guida.rag.index_sync import (
     file_content_hash,
     sync_workspace_index,
     upsert_indexed_file,

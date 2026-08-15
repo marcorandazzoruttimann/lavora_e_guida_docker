@@ -14,14 +14,13 @@ dependencies = [
     "pydantic-settings>=2",
     "python-dotenv>=1",
     "rich>=13",
+    "pypdf>=4",
+    "rapidfuzz>=3",
+    "chromadb>=0.5",
 ]
 
 [project.optional-dependencies]
-crewai = ["crewai"]
-autogen = ["autogen-agentchat", "autogen-ext"]
 dev = ["pytest>=8", "ruff>=0.6"]
-# Extra per sandbox/ollama_fs_lab: PDF (pypdf) + fuzzy path resolve (rapidfuzz) + RAG (chromadb).
-lab = ["pypdf>=4", "rapidfuzz>=3", "chromadb>=0.5"]
 
 [project.scripts]
 lavora-e-guida = "lavora_e_guida.main:main"
@@ -31,8 +30,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# `src` = package lavora_e_guida; `.` = sandbox/ollama_fs_lab nei test lab.
-pythonpath = ["src", "."]
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100

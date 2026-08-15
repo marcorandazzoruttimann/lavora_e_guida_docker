@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from sandbox.ollama_fs_lab.file_resolver import (
+from lavora_e_guida.tools.file_resolver import (
     _clean_stt_input,
     _number_canonical_key,
     resolve_file_path,
 )
-from sandbox.ollama_fs_lab.tools_fs import append_note, read_file
+from lavora_e_guida.tools.fs import append_note, read_file
 
 
 def _write_minimal_pdf(path: Path, line: str = "Verbale lab Ollama") -> None:
@@ -136,7 +136,7 @@ def test_tool_smoke_read_file_prefers_text(
     """read_file senza hint PDF preferisce notes/spesa.txt sull'omonimo PDF."""
     # Isolamento: i tool usano WORKSPACE_ROOT importato a module level.
     monkeypatch.setattr(
-        "sandbox.ollama_fs_lab.tools_fs.WORKSPACE_ROOT",
+        "lavora_e_guida.tools.fs.WORKSPACE_ROOT",
         workspace,
     )
     # Nome come lo emetterebbe STT/LLM senza cartella né estensione.
@@ -161,7 +161,7 @@ def test_tool_smoke_read_file_pdf_hint(
 ) -> None:
     """read_file con hint PDF (.pdf o «punto pdf») → inbox/spesa.pdf, non .txt."""
     monkeypatch.setattr(
-        "sandbox.ollama_fs_lab.tools_fs.WORKSPACE_ROOT",
+        "lavora_e_guida.tools.fs.WORKSPACE_ROOT",
         workspace,
     )
     # Hint esplicito: omonimo testo ignorato a favore del PDF.
@@ -177,7 +177,7 @@ def test_tool_smoke_append_note_dirty_name(
 ) -> None:
     """append_note con nome sporco appende sul match fuzzy esistente (non crea)."""
     monkeypatch.setattr(
-        "sandbox.ollama_fs_lab.tools_fs.WORKSPACE_ROOT",
+        "lavora_e_guida.tools.fs.WORKSPACE_ROOT",
         workspace,
     )
     # 'spessa' → fuzzy su notes/spesa.txt; action=aggiornata nel messaggio.

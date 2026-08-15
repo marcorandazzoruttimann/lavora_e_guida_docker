@@ -12,8 +12,8 @@ import logging
 import re
 from pathlib import Path
 
-from sandbox.ollama_fs_lab.config import INDEX_ROOT, WORKSPACE_ROOT
-from sandbox.ollama_fs_lab.file_resolver import resolve_file_path
+from lavora_e_guida.config import INDEX_ROOT, WORKSPACE_ROOT
+from lavora_e_guida.tools.file_resolver import resolve_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def _sync_index_after_write(rel_posix: str) -> None:
     Non fallisce il tool FS se Chroma/SQLite non disponibili: log warning.
     """
     try:
-        from sandbox.ollama_fs_lab.rag.index_sync import upsert_indexed_file
+        from lavora_e_guida.rag.index_sync import upsert_indexed_file
 
         upsert_indexed_file(WORKSPACE_ROOT, rel_posix, index_root=INDEX_ROOT)
     except Exception as exc:  # noqa: BLE001 — indice opzionale, FS deve restare ok
@@ -294,14 +294,14 @@ def _extract_pdf_text(
         from pypdf import PdfReader
     except ImportError as exc:
         raise FsToolError(
-            "pypdf non installato: esegui `pip install pypdf` "
-            '(oppure `pip install -e ".[lab]"` dalla root del repo).'
+            "pypdf non installato: esegui `pip install -e .` "
+            "dalla root del repo."
         ) from exc
 
     # Apertura binaria: pypdf gestisce stream; errori tipici → messaggio parlante.
     try:
         reader = PdfReader(str(path))
-    except Exception as exc:  # noqa: BLE001 — PDF corrotti variano molto
+    except Exception as exc:
         raise FsToolError(f"PDF {display!r} non leggibile: {exc}") from exc
 
     # PDF cifrati senza password: pypdf espone is_encrypted; non tentiamo crack.

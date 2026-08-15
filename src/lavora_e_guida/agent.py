@@ -13,25 +13,24 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from lavora_e_guida.audio.interface import BaseSTT, BaseTTS
-from lavora_e_guida.llm.cloud import GeminiChat
-from lavora_e_guida.llm.errors import LLMError
-from lavora_e_guida.llm.local_ollama import LocalOllama
-from lavora_e_guida.llm.usage import TokenUsage
-
-from sandbox.ollama_fs_lab.config import (
+from lavora_e_guida.config import (
     GEMINI_MODEL,
     OLLAMA_MODEL,
     OLLAMA_URL,
     TELEMETRY_DB,
 )
-from sandbox.ollama_fs_lab.telemetry import TelemetryDB, utc_now_iso
-from sandbox.ollama_fs_lab.tools_fs import (
+from lavora_e_guida.llm.cloud import GeminiChat
+from lavora_e_guida.llm.errors import LLMError
+from lavora_e_guida.llm.local_ollama import LocalOllama
+from lavora_e_guida.llm.usage import TokenUsage
+from lavora_e_guida.telemetry import TelemetryDB, utc_now_iso
+from lavora_e_guida.tools.find import FindToolError, find_file
+from lavora_e_guida.tools.fs import (
     FsToolError,
     append_note,
     create_text_file,
     read_file,
 )
-from sandbox.ollama_fs_lab.tools_find import FindToolError, find_file
 
 # Schema unico name+content per create/append: meno campi = meno errori sui 3B.
 # Path resolve resta solo in Python; il modello vede solo name/content/reply.
@@ -64,7 +63,7 @@ _SYSTEM_PROMPT = (
     'JSON: {"tool": "none", "reply": "Ho aggiunto latte alla spesa"}'
 )
 
-# Comandi di uscita case-insensitive: allineati al main Phase 2 del progetto.
+# Comandi di uscita case-insensitive: allineati all'entrypoint vocale.
 _EXIT_WORDS = frozenset({"esci", "exit", "quit"})
 
 # Whitelist tool Step 2–6: qualunque altro nome → errore parlante (anti-invenzione).

@@ -2,14 +2,7 @@
 
 Ecosistema agentico vocale hands-free: orchestratore in WSL2, I/O audio sul Windows host.
 
-## Stato fasi
-
-| Fase | Stato |
-|------|--------|
-| Phase 0 — Bootstrap | fatto |
-| Phase 1 — Audio Mock/HTTP | fatto |
-| Phase 2 — Ollama + state machine + intent stub | fatto |
-| Phase 3+ | non iniziata |
+Loop attuale: Mock/HTTP STT → LLM locale (Ollama) o Gemini → tool filesystem/RAG sul Desktop → TTS.
 
 ## Quick start (Mock, senza microfono)
 
@@ -17,18 +10,19 @@ Ecosistema agentico vocale hands-free: orchestratore in WSL2, I/O audio sul Wind
 source .venv/bin/activate
 pip install -e ".[dev]"
 lavora-e-guida
-# Digita una frase, poi `esci`.
+# Digita una frase (crea/aggiorna/leggi/cerca file), poi `esci`.
 ```
 
-## Ollama (Phase 2)
+Equivalente: `python -m lavora_e_guida`. Provider cloud: `lavora-e-guida --llm gemini` (serve `GEMINI_API_KEY` in `.env`).
 
-Vedi [docs/ollama.md](docs/ollama.md). Benchmark intent:
+## Workspace e indice
 
-```bash
-.venv/bin/python scripts/bench_ollama_intent.py
-```
+| Concetto | Path | Ruolo |
+| --- | --- | --- |
+| Data workspace | `WORKSPACE_ROOT` (default Desktop `Ollama_test`) | File utente: note, PDF, create/read/append |
+| Indice RAG | `INDEX_ROOT` (`ollama_lab/` nel repo) | SQLite + Chroma; path in DB relativi al data workspace |
 
-Topologia agenti (checkpoint 2.4): [docs/phase2_topology.md](docs/phase2_topology.md).
+Dettagli Ollama, modelli e variabili: [docs/ollama.md](docs/ollama.md).
 
 ## Test
 

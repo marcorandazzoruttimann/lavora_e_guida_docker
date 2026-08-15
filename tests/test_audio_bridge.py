@@ -1,19 +1,20 @@
-"""Test Phase 1: Mock echo + client HTTP bridge (senza host reale)."""
+"""Test audio Mock + client HTTP bridge (senza host reale)."""
 
 from __future__ import annotations
 
 import json
 from io import StringIO
+from pathlib import Path
 
 import httpx
 import pytest
 
+from lavora_e_guida.agent import run_chat_loop
 from lavora_e_guida.audio.factory import create_audio_pair, create_stt, create_tts
 from lavora_e_guida.audio.http_bridge import HttpBridgeSTT, HttpBridgeTTS
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
 from lavora_e_guida.config import Settings
-from lavora_e_guida.main import run_agent_loop
-from lavora_e_guida.routing.intent import IntentClassifier
+from lavora_e_guida.llm.usage import TokenUsage
 
 
 def test_mock_listen_returns_line() -> None:
@@ -40,29 +41,64 @@ def test_mock_speak_writes_prefixed_line() -> None:
     assert out.getvalue() == "[TTS] prova\n"
 
 
-def test_agent_loop_mock_end_to_end_phase1_compat() -> None:
-    """Audio Mock + loop Phase 2 (heuristic): regressione del canale I/O."""
-    infile = StringIO("prova echo\nesci\n")
+def test_agent_loop_mock_end_to_end(tmp_path: Path) -> None:
+    """Audio Mock + loop vocale (LLM fake): regressione del canale I/O."""
+
+    class _FakeLLM:
+        """Una sola reply parlata: niente tool FS, solo canale STT/TTS."""
+
+        last_usage = TokenUsage()
+
+        def chat(self, *args: object, **kwargs: object) -> str:
+            return '{"tool": "none", "reply": "Ciao dal loop vocale"}'
+
+        def close(self) -> None:
+            return None
+
+    infile = StringIO("ciao\nesci\n")
     outfile = StringIO()
     stt = MockSTT(infile=infile, outfile=outfile, prompt="")
     tts = MockTTS(outfile=outfile, prefix="[TTS] ")
-    code = run_agent_loop(stt, tts, IntentClassifier(llm=None))
+    # DB temporaneo: non toccare ollama_lab/telemetry.db del repo.
+    code = run_chat_loop(
+        stt,
+        tts,
+        _FakeLLM(),
+        report_latency=False,
+        telemetry_db=tmp_path / "telemetry.db",
+    )
     assert code == 0
     spoken = outfile.getvalue()
-    # Introduzione + stub intent + saluto di chiusura (non più echo puro).
-    assert "Pronto." in spoken
-    assert "Intent GENERAL" in spoken
-    assert "Hai detto: prova echo" in spoken
+    # Introduzione lab + reply LLM + saluto di chiusura.
+    assert "Lab Ollama FS" in spoken
+    assert "Ciao dal loop vocale" in spoken
     assert "Arrivederci." in spoken
 
 
-def test_agent_loop_empty_input_exits() -> None:
+def test_agent_loop_empty_input_exits(tmp_path: Path) -> None:
     """Enter a vuoto / transcript blank → uscita senza crash."""
+
+    class _UnusedLLM:
+        def chat(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("LLM non deve essere chiamato su input vuoto")
+
+        def close(self) -> None:
+            return None
+
     infile = StringIO("   \n")
     outfile = StringIO()
     stt = MockSTT(infile=infile, outfile=outfile, prompt="")
     tts = MockTTS(outfile=outfile)
-    assert run_agent_loop(stt, tts, IntentClassifier(llm=None)) == 0
+    assert (
+        run_chat_loop(
+            stt,
+            tts,
+            _UnusedLLM(),
+            report_latency=False,
+            telemetry_db=tmp_path / "telemetry.db",
+        )
+        == 0
+    )
     assert "Nessun input" in outfile.getvalue()
 
 

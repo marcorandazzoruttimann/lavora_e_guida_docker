@@ -18,7 +18,6 @@ from pathlib import Path
 
 from rapidfuzz import fuzz, process
 
-
 # Stopword di comando/STT italiano: rumore da togliere prima del match sullo stem.
 # Ordine lungo→corto nelle frasi multi-token gestito a parte (estensioni pronunciate).
 # Include verbi di lettura e di append_note (“aggiungi/aggiorna … spesa”).
@@ -173,11 +172,10 @@ def _merge_numeric_run(digit_tokens: list[str]) -> str:
     for nxt in digit_tokens[1:]:
         prev_i = int(pieces[-1])
         cur_i = int(nxt)
-        # “venti tre” / “trenta cinque”: composizione italiana decina+unità.
-        if prev_i in _IT_TENS and 1 <= cur_i <= 9:
-            pieces[-1] = str(prev_i + cur_i)
-        # “cento tre” (raro nei nomi file, ma simmetrico alle decine).
-        elif prev_i == 100 and 0 < cur_i < 100:
+        # “venti tre” / “cento tre”: composizione italiana (decina+unità o cento+resto).
+        if (prev_i in _IT_TENS and 1 <= cur_i <= 9) or (
+            prev_i == 100 and 0 < cur_i < 100
+        ):
             pieces[-1] = str(prev_i + cur_i)
         else:
             # Cifre isolate o padded: le concateniamo poi normalizziamo con int().
