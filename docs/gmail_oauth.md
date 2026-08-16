@@ -44,7 +44,7 @@ Un solo client Desktop per tutto: lettura ora, send/modify dopo. Non creare un s
 | --- | --- | --- |
 | Client ID / secret | `.env` (già gitignored) | `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` |
 | Account atteso | `.env` | `GMAIL_USER=account@gmail.com` |
-| Refresh token | `INDEX_ROOT/gmail_token.json` | Default: `ollama_lab/gmail_token.json`. Google **riscrive** il JSON al refresh: non metterlo nel `.env`. |
+| Refresh token | `INDEX_ROOT/gmail_token.json` | Default: `runtime/gmail_token.json`. Google **riscrive** il JSON al refresh: non metterlo nel `.env`. |
 | Path token opzionale | `.env` | `# GMAIL_TOKEN_FILE=` — se omesso, `INDEX_ROOT/gmail_token.json` |
 
 Il file token ha permessi restrittivi (`0600`). Non va in git.

@@ -8,6 +8,7 @@ import pytest
 
 from lavora_e_guida import config as config_mod
 from lavora_e_guida.config import (
+    DEFAULT_INDEX_DIRNAME,
     GEMINI_MODEL,
     INDEX_ROOT,
     OLLAMA_MODEL,
@@ -34,13 +35,13 @@ def test_settings_has_no_orchestrator_framework() -> None:
 
 
 def test_settings_fs_and_gemini_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default runtime: Desktop Ollama_test, ollama_lab nel repo, Gemini flash."""
+    """Default runtime: Desktop Ollama_test, runtime/ nel repo, Gemini flash."""
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("INDEX_ROOT", raising=False)
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     settings = Settings(_env_file=None)
     assert settings.workspace_root == Path("/mnt/c/Users/User/Desktop/Ollama_test")
-    assert settings.index_root == PROJECT_ROOT / "ollama_lab"
+    assert settings.index_root == PROJECT_ROOT / DEFAULT_INDEX_DIRNAME
     assert settings.gemini_model == "gemini-3.5-flash"
     assert settings.telemetry_db == settings.index_root / "telemetry.db"
 

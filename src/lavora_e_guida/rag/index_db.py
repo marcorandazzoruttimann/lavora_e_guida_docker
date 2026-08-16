@@ -18,7 +18,8 @@ from typing import Self
 
 # Nome file SQLite dentro la cartella indice (INDEX_ROOT nel repo).
 DB_FILENAME = "files.db"
-# Nomi legacy sul data workspace Desktop: solo per hint migrazione manuale.
+# Nomi legacy sul data workspace Desktop (ex indice nel lab Ollama): hint migrazione.
+# Il default nel repo è `runtime/`; queste cartelle non vanno toccate in automatico.
 LEGACY_WORKSPACE_INDEX_NAMES: frozenset[str] = frozenset({"ollama_lab", ".ollama_lab"})
 
 logger = logging.getLogger(__name__)

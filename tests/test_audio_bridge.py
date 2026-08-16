@@ -59,7 +59,7 @@ def test_agent_loop_mock_end_to_end(tmp_path: Path) -> None:
     outfile = StringIO()
     stt = MockSTT(infile=infile, outfile=outfile, prompt="")
     tts = MockTTS(outfile=outfile, prefix="[TTS] ")
-    # DB temporaneo: non toccare ollama_lab/telemetry.db del repo.
+    # DB temporaneo: non toccare runtime/telemetry.db del repo.
     code = run_chat_loop(
         stt,
         tts,

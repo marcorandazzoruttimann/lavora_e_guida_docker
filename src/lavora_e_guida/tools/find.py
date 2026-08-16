@@ -30,7 +30,7 @@ class FindToolError(FsToolError):
 def _ensure_index(workspace: Path, index_root: Path = INDEX_ROOT) -> None:
     """Sync lazy: se manca files.db, indicizza tutto il workspace una volta.
 
-    Side-effect: può creare `ollama_lab/` sotto il repo e caricare embed (CPU, one-shot).
+    Side-effect: può creare `runtime/` sotto il repo e caricare embed (CPU, one-shot).
     """
     if not db_path(index_root).is_file():
         logger.info("indice assente: sync completo workspace %s → index %s", workspace, index_root)

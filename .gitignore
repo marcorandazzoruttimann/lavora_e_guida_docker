@@ -39,12 +39,17 @@ Thumbs.db
 *.log
 logs/
 
-# Indice RAG generato localmente (cartella tracciata via .gitkeep)
+# Stato locale generato (cartella tracciata via .gitkeep): RAG, telemetria, token
+runtime/files.db
+runtime/telemetry.db
+runtime/chroma/
+runtime/gmail_token.json
+# Residuo del vecchio nome cartella (pre-rename ollama_lab → runtime)
 ollama_lab/files.db
 ollama_lab/telemetry.db
 ollama_lab/chroma/
+ollama_lab/gmail_token.json
 
 # Gmail OAuth: refresh token (Google lo riscrive) e JSON credenziali scaricato dalla Console
-ollama_lab/gmail_token.json
 **/gmail_token.json
 **/client_secret*.json

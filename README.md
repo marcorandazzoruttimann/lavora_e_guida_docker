@@ -20,7 +20,7 @@ Equivalente: `python -m lavora_e_guida`. Provider cloud: `lavora-e-guida --llm g
 | Concetto | Path | Ruolo |
 | --- | --- | --- |
 | Data workspace | `WORKSPACE_ROOT` (default Desktop `Ollama_test`) | File utente: note, PDF, create/read/append |
-| Indice RAG | `INDEX_ROOT` (`ollama_lab/` nel repo) | SQLite + Chroma; path in DB relativi al data workspace |
+| Stato locale | `INDEX_ROOT` (`runtime/` nel repo) | SQLite + Chroma, telemetria STT, token Gmail; path in DB relativi al data workspace |
 
 Dettagli Ollama, modelli e variabili: [docs/ollama.md](docs/ollama.md).
 

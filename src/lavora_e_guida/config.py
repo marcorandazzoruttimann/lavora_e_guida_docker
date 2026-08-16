@@ -15,8 +15,11 @@ from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root: `src/lavora_e_guida/config.py` → parents[2].
-# I path runtime (`ollama_lab/`, Desktop `Ollama_test`) restano invariati.
+# Stato locale nel repo (`runtime/`: indice RAG, telemetria, token Gmail).
+# I file utente restano sul Desktop (`Ollama_test`).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Nome cartella INDEX_ROOT di default: non è più `ollama_lab` (troppo legato a un solo LLM).
+DEFAULT_INDEX_DIRNAME = "runtime"
 
 
 def discover_windows_host() -> str:
@@ -59,9 +62,9 @@ class Settings(BaseSettings):
     # File utente (note, PDF, create/read/append) sul Desktop Windows montato in WSL.
     # Path traversal oltre questo root è rifiutato dagli tool FS.
     workspace_root: Path = Path("/mnt/c/Users/User/Desktop/Ollama_test")
-    # SQLite + Chroma nel progetto Cursor (non sul Desktop).
+    # Stato locale nel repo (non sul Desktop): SQLite + Chroma, telemetry.db, gmail_token.json.
     # I path in DB restano relativi a `workspace_root`.
-    index_root: Path = PROJECT_ROOT / "ollama_lab"
+    index_root: Path = PROJECT_ROOT / DEFAULT_INDEX_DIRNAME
 
     # Gmail OAuth (consenso a tavolino, mai nel loop vocale).
     # Id/secret del client Desktop e mailbox attesa: stesso pattern di GEMINI_API_KEY (.env).
@@ -117,7 +120,7 @@ def get_settings() -> Settings:
 # Snapshot env/.env all'import: i tool fanno `from lavora_e_guida.config import WORKSPACE_ROOT`
 # e legano il valore sul proprio modulo. I test monkeypatchano quello, non Settings.
 _cfg = get_settings()
-# Data workspace Desktop (Ollama_test) e indice RAG nel repo (ollama_lab/).
+# Data workspace Desktop (Ollama_test) e stato locale nel repo (runtime/).
 WORKSPACE_ROOT = _cfg.workspace_root
 INDEX_ROOT = _cfg.index_root
 # Telemetria token STT: file dedicato, non files.db.
