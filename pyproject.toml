@@ -17,6 +17,8 @@ dependencies = [
     "pypdf>=4",
     "rapidfuzz>=3",
     "chromadb>=0.5",
+    "google-auth>=2",
+    "google-auth-oauthlib>=1",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +26,7 @@ dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 lavora-e-guida = "lavora_e_guida.main:main"
+lavora-e-guida-gmail-auth = "lavora_e_guida.gmail.auth_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

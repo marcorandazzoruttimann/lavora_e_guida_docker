@@ -74,3 +74,44 @@ def test_env_overrides_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEMINI_MODEL", "gemini-2.0-flash")
     settings = Settings(_env_file=None)
     assert settings.gemini_model == "gemini-2.0-flash"
+
+
+def test_gmail_settings_default_token_under_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Senza GMAIL_TOKEN_FILE il refresh token vive in INDEX_ROOT/gmail_token.json."""
+    monkeypatch.delenv("GMAIL_CLIENT_ID", raising=False)
+    monkeypatch.delenv("GMAIL_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("GMAIL_USER", raising=False)
+    monkeypatch.delenv("GMAIL_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("INDEX_ROOT", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.gmail_client_id is None
+    assert settings.gmail_client_secret is None
+    assert settings.gmail_user is None
+    assert settings.gmail_token_file == settings.index_root / "gmail_token.json"
+
+
+def test_gmail_token_file_follows_index_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Se cambia INDEX_ROOT e GMAIL_TOKEN_FILE è vuoto, il token segue l'indice."""
+    index = tmp_path / "index"
+    monkeypatch.setenv("INDEX_ROOT", str(index))
+    monkeypatch.setenv("GMAIL_TOKEN_FILE", "")
+    settings = Settings(_env_file=None)
+    assert settings.gmail_token_file == index / "gmail_token.json"
+
+
+def test_gmail_env_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Client, mailbox e path token da env vincono sui default (senza .env)."""
+    token = tmp_path / "custom_gmail_token.json"
+    monkeypatch.setenv("GMAIL_CLIENT_ID", "desktop-client-id")
+    monkeypatch.setenv("GMAIL_CLIENT_SECRET", "desktop-client-secret")
+    monkeypatch.setenv("GMAIL_USER", "account@gmail.com")
+    monkeypatch.setenv("GMAIL_TOKEN_FILE", str(token))
+    settings = Settings(_env_file=None)
+    assert settings.gmail_client_id == "desktop-client-id"
+    assert settings.gmail_client_secret == "desktop-client-secret"
+    assert settings.gmail_user == "account@gmail.com"
+    assert settings.gmail_token_file == token

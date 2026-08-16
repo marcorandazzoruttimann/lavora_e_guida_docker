@@ -43,3 +43,8 @@ logs/
 ollama_lab/files.db
 ollama_lab/telemetry.db
 ollama_lab/chroma/
+
+# Gmail OAuth: refresh token (Google lo riscrive) e JSON credenziali scaricato dalla Console
+ollama_lab/gmail_token.json
+**/gmail_token.json
+**/client_secret*.json

@@ -39,7 +39,13 @@ AUDIO_DRIVER=mock
 # INDEX_ROOT=   # default: <repo>/ollama_lab
 # GEMINI_API_KEY=
 # GEMINI_MODEL=gemini-3.5-flash
+GMAIL_CLIENT_ID=
+GMAIL_CLIENT_SECRET=
+GMAIL_USER=account@gmail.com
+# GMAIL_TOKEN_FILE=   # default: INDEX_ROOT/gmail_token.json
 ```
+
+Gmail: consenso OAuth a tavolino (non nel loop vocale). Dettagli in [docs/gmail_oauth.md](gmail_oauth.md).
 
 Se WSL ha ~5 Gi RAM e `qwen2.5:3b` provoca swap pesante, usare `gemma2:2b`.
 

@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root: `src/lavora_e_guida/config.py` → parents[2].
@@ -62,6 +62,33 @@ class Settings(BaseSettings):
     # SQLite + Chroma nel progetto Cursor (non sul Desktop).
     # I path in DB restano relativi a `workspace_root`.
     index_root: Path = PROJECT_ROOT / "ollama_lab"
+
+    # Gmail OAuth (consenso a tavolino, mai nel loop vocale).
+    # Id/secret del client Desktop e mailbox attesa: stesso pattern di GEMINI_API_KEY (.env).
+    gmail_client_id: str | None = None
+    gmail_client_secret: str | None = None
+    # Indirizzo che deve coincidere col profile Gmail dopo il consenso (account sbagliato → errore).
+    gmail_user: str | None = None
+    # Refresh token su disco: Google riscrive il JSON al refresh, quindi non va nel .env.
+    # None / stringa vuota → INDEX_ROOT/gmail_token.json; override con GMAIL_TOKEN_FILE.
+    gmail_token_file: Path | None = None
+
+    @field_validator("gmail_token_file", mode="before")
+    @classmethod
+    def _blank_gmail_token_file(cls, value: object) -> object:
+        # GMAIL_TOKEN_FILE= (vuoto nel .env) deve usare il default, non Path("").
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def _default_gmail_token_file(self) -> Settings:
+        # Un solo file token per il client Desktop; vive nell'indice accanto a files.db.
+        if self.gmail_token_file is None:
+            self.gmail_token_file = Path(self.index_root) / "gmail_token.json"
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property

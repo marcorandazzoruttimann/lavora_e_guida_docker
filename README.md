@@ -24,6 +24,8 @@ Equivalente: `python -m lavora_e_guida`. Provider cloud: `lavora-e-guida --llm g
 
 Dettagli Ollama, modelli e variabili: [docs/ollama.md](docs/ollama.md).
 
+Connessione Gmail (OAuth Desktop a tavolino, non nel loop vocale): [docs/gmail_oauth.md](docs/gmail_oauth.md).
+
 ## Test
 
 ```bash
