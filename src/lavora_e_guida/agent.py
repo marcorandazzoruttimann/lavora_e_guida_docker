@@ -1,14 +1,16 @@
-"""Loop singolo agente: MockSTT → LocalOllama (JSON tool) → FsTools → MockTTS.
+"""Loop vocale riusabile: STT → LLM (JSON tool) → dispatch dello spec → TTS.
 
-Step 2–6: il modello può chiamare create/append/`read_file` (testo + PDF) sul
-workspace Desktop. Schema JSON stretto (format=json + extract) perché i 3B
-sbagliano facilmente con tool nativi Ollama troppo aperti.
+Il default è il master FS (create/append/read/find sul Desktop). Gli specialisti
+passano un `LoopSpec` diverso; questo modulo non importa i tool Gmail.
+Schema JSON stretto (format=json + extract): contratto del loop, non del solo 3B.
 """
 
 from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -63,6 +65,12 @@ _SYSTEM_PROMPT = (
     'JSON: {"tool": "none", "reply": "Ho aggiunto latte alla spesa"}'
 )
 
+# Intro TTS del master: non è una reply LLM, quindi niente riga telemetria.
+_MASTER_INTRO_TEXT = (
+    "Lab Ollama FS: posso creare, aggiornare e leggere file, "
+    "cercare per contenuto con find file, sul Desktop. Di' esci per terminare."
+)
+
 # Comandi di uscita case-insensitive: allineati all'entrypoint vocale.
 _EXIT_WORDS = frozenset({"esci", "exit", "quit"})
 
@@ -75,6 +83,32 @@ _ALLOWED_TOOLS = frozenset({_TOOL_CREATE, _TOOL_APPEND, _TOOL_READ, _TOOL_FIND})
 
 # Limite round tool per turno utente: evita loop infinito se il modello ripete.
 _MAX_TOOL_ROUNDS = 4
+
+
+# Dispatch: Python esegue il tool; ritorna stringa di esito per il modello.
+ToolDispatch = Callable[[str, dict[str, Any]], str]
+# Stampa esito su stdout ([FS], [RAG], [GMAIL]); lo spec decide il prefisso.
+ToolResultPrinter = Callable[[str, str], None]
+
+
+@dataclass(frozen=True)
+class LoopSpec:
+    """Contratto minimo del loop: prompt, tool, intro TTS, recovery JSON.
+
+    Default = master FS (`MASTER_LOOP_SPEC`). Uno specialista (Gmail) passa
+    un'istanza propria; il master non importa i tool email.
+    """
+
+    # System prompt fisso in testa alla storia per tutta la sessione.
+    system_prompt: str
+    # Esegue un tool e ritorna l'esito parlante (OK: / ERRORE:).
+    dispatch: ToolDispatch
+    # Prima frase TTS all'avvio: identità dell'agente, non reply LLM.
+    intro_text: str
+    # Messaggio user di recovery se il JSON del modello è rotto.
+    schema_hint: str
+    # None = nessun dump a terminale (solo follow-up verso l'LLM).
+    print_tool_result: ToolResultPrinter | None = None
 
 
 class SupportsChat(Protocol):
@@ -188,6 +222,35 @@ def _print_read_file_to_terminal(result: str) -> bool:
     return True
 
 
+def _print_master_tool_result(tool: str, result: str) -> None:
+    """Stdout del master: [FS] per read_file, [RAG] per find_file.
+
+    Gli altri tool (create/append) non dumpano il corpo: basta il TTS.
+    Uno spec Gmail userà analogamente un prefisso [GMAIL].
+    """
+    # Stesso filtro OK: gli ERRORE restano solo nel follow-up all'LLM.
+    if tool == _TOOL_READ:
+        _print_read_file_to_terminal(result)
+    elif tool == _TOOL_FIND:
+        _print_find_file_to_terminal(result)
+
+
+def _tool_loop_key(tool: str, args: dict[str, Any]) -> str:
+    """Chiave anti-ripetizione nel turno: query se presente, altrimenti name.
+
+    find_file e list_emails identificano la ricerca con `query`; read_file e
+    read_email usano `name`. Preferire query evita collisioni se entrambi
+    i campi arrivano nello stesso args (i 3B a volte mischiano le chiavi).
+    """
+    query = args.get("query")
+    # Stringa non vuota: è una ricerca, non un identificatore di file/mail.
+    if isinstance(query, str) and query.strip():
+        identity = query.strip().casefold()
+    else:
+        identity = str(args.get("name") or "").strip().casefold()
+    return f"{tool}|{identity}"
+
+
 def _parse_agent_json(raw: str) -> dict[str, Any]:
     """Estrae oggetto JSON da risposta modello (anche con rumore intorno)."""
     return LocalOllama.extract_json_object(raw)
@@ -206,6 +269,17 @@ def _json_schema_hint() -> str:
         'oppure {"tool":"read_file","args":{"name":"string"}} '
         'oppure {"tool":"find_file","args":{"query":"string"}}.'
     )
+
+
+# Spec di default: stesso prompt, dispatch, intro e stampa del master FS.
+# I test e `lavora-e-guida` senza --agent restano invariati.
+MASTER_LOOP_SPEC = LoopSpec(
+    system_prompt=_SYSTEM_PROMPT,
+    dispatch=_dispatch_tool,
+    intro_text=_MASTER_INTRO_TEXT,
+    schema_hint=_json_schema_hint(),
+    print_tool_result=_print_master_tool_result,
+)
 
 
 def _record_stt_turn(
@@ -242,24 +316,25 @@ def run_chat_loop(
     # Path file SQLite; None → TELEMETRY_DB (INDEX_ROOT / telemetry.db).
     # I test passano tmp_path / "telemetry.db" per non toccare il DB reale.
     telemetry_db: Path | None = None,
+    # None → master FS: prompt, dispatch e intro attuali restano il default.
+    spec: LoopSpec | None = None,
 ) -> int:
     """Un turno = listen → (tool JSON)* → reply TTS; ritorna 0 in uscita normale.
 
-    Side-effect: storia conversazione append-only; FS/PDF se il modello chiama
-    i tool; TTS stampa ogni reply finale (contenuto, Q&A o riassunto);
-    una riga telemetria per turno vocale valido (non intro / riga vuota / esci).
+    Side-effect: storia conversazione append-only; tool dello spec (FS di
+    default); TTS stampa ogni reply finale; una riga telemetria per turno
+    vocale valido (non intro / riga vuota / esci).
     """
-    # Messaggi Ollama: il system resta fisso in testa per tutto il loop.
+    # Default esplicito: chi non passa spec ottiene il master, non uno vuoto.
+    loop_spec = spec if spec is not None else MASTER_LOOP_SPEC
+
+    # Messaggi LLM: il system dello spec resta fisso in testa per tutto il loop.
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": loop_spec.system_prompt},
     ]
 
-    # Introduzione parlata: un solo tool di lettura (testo + PDF).
-    # Non è una reply LLM: nessuna riga telemetria.
-    tts.speak(
-        "Lab Ollama FS: posso creare, aggiornare e leggere file, "
-        "cercare per contenuto con find file, sul Desktop. Di' esci per terminare."
-    )
+    # Introduzione parlata dallo spec: non è una reply LLM, niente telemetria.
+    tts.speak(loop_spec.intro_text)
 
     # Lazy connect: il file SQLite nasce al primo insert, non all'avvio.
     store = TelemetryDB(telemetry_db if telemetry_db is not None else TELEMETRY_DB)
@@ -270,6 +345,7 @@ def run_chat_loop(
             llm,
             messages,
             store,
+            loop_spec,
             max_turns=max_turns,
             report_latency=report_latency,
         )
@@ -284,6 +360,7 @@ def _run_chat_loop_body(
     llm: SupportsChat,
     messages: list[dict[str, str]],
     store: TelemetryDB,
+    spec: LoopSpec,
     *,
     max_turns: int | None,
     report_latency: bool,
@@ -314,7 +391,7 @@ def _run_chat_loop_body(
 
         # --- THINKING + TOOLS: fino a reply o esaurimento round ------------
         spoken = False
-        # Chiave tool|name già eseguita nel turno: anti-loop sui 3B.
+        # Chiave tool|query-o-name già eseguita nel turno: anti-loop sui 3B.
         prev_tool_key: str | None = None
         for _round in range(_MAX_TOOL_ROUNDS):
             t0 = time.perf_counter()
@@ -370,11 +447,11 @@ def _run_chat_loop_body(
             try:
                 parsed = _parse_agent_json(raw)
             except LLMError:
-                # JSON rotto tipico dei 3B (OllamaError ⊂ LLMError): retry strutturata.
+                # JSON rotto: retry con lo schema dello spec (master o specialista).
                 messages.append(
                     {
                         "role": "user",
-                        "content": _json_schema_hint(),
+                        "content": spec.schema_hint,
                     }
                 )
                 continue
@@ -417,13 +494,9 @@ def _run_chat_loop_body(
                     "content": top_content,
                 }
             args_dict = args if isinstance(args, dict) else {}
-            # Chiave anti-loop: find_file usa query, gli altri name.
-            if tool == _TOOL_FIND:
-                tool_key = f"{tool}|{str(args_dict.get('query') or '').strip().casefold()}"
-            else:
-                tool_name_arg = str(args_dict.get("name") or "")
-                tool_key = f"{tool}|{tool_name_arg.strip().casefold()}"
-            # Anti-loop: i 3B ripetono read_file dopo Esito OK; Python interrompe.
+            # Chiave anti-loop: query se presente (find/list), altrimenti name.
+            tool_key = _tool_loop_key(tool, args_dict)
+            # Anti-loop: i 3B ripetono lo stesso tool dopo Esito OK; Python interrompe.
             if prev_tool_key is not None and tool_key == prev_tool_key:
                 messages.append(
                     {
@@ -437,13 +510,12 @@ def _run_chat_loop_body(
                 )
                 continue
 
-            result = _dispatch_tool(tool, args_dict)
+            # Dispatch dello spec: master → FS/RAG; Gmail → list/read email.
+            result = spec.dispatch(tool, args_dict)
 
-            # read_file / find_file: stampa subito il corpo a terminale.
-            if tool == _TOOL_READ:
-                _print_read_file_to_terminal(result)
-            elif tool == _TOOL_FIND:
-                _print_find_file_to_terminal(result)
+            # Dump stdout analogo a [FS]/[RAG]; lo spec sceglie prefisso e filtro.
+            if spec.print_tool_result is not None:
+                spec.print_tool_result(tool, result)
 
             # Ruolo user con esito + vincolo tool=none (anti-ripetizione 3B).
             prev_tool_key = tool_key

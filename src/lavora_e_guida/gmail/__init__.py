@@ -1,7 +1,7 @@
-"""Client Gmail condiviso: OAuth a tavolino, nessun tool nel master vocale.
+"""Client Gmail: OAuth a tavolino e tool di sola lettura.
 
-Il futuro agente email importa da qui. L'agente master (FS/RAG) non deve
-importare questo pacchetto: Gmail non entra nel loop vocale né nel system prompt.
+L'agente master (FS/RAG) non deve importare questo pacchetto: i tool email
+restano nello specialista Gmail (`list_emails` / `read_email`).
 """
 
 from lavora_e_guida.gmail.oauth import (
@@ -13,6 +13,11 @@ from lavora_e_guida.gmail.oauth import (
     get_gmail_credentials,
     gmail_profile,
 )
+from lavora_e_guida.gmail.read import (
+    MailboxSession,
+    list_emails,
+    read_email,
+)
 
 __all__ = [
     "GMAIL_SCOPES",
@@ -20,6 +25,9 @@ __all__ = [
     "SCOPE_READONLY",
     "SCOPE_SEND",
     "GmailAuthError",
+    "MailboxSession",
     "get_gmail_credentials",
     "gmail_profile",
+    "list_emails",
+    "read_email",
 ]
