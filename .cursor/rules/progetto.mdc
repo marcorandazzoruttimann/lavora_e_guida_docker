@@ -14,6 +14,9 @@ Valgono per l’intero repo e per ogni agente Cursor che lavora su questo proget
 
 ## 2. Commenti molto verbosi nel codice
 
-- Commentare la logica **circa ogni 2–3 righe**, in stile didattico: spiegare *perché* e *cosa fa* il blocco successivo.
-- Preferire intenzioni, contratti, side-effect e vincoli (WSL/Host, audio, sicurezza alla guida).
-- Non commentare il banale letterale (es. `i += 1` → “incrementa i”); commentare il contesto utile alla review hands-free.
+Questo è un progetto di studio: i commenti nel codice devono essere **più verbosi del consueto**, in **italiano**.
+
+- Commentare la logica **circa ogni 1–2 righe** (non ogni 2–3): spiegare *perché* esiste il blocco e *cosa fa* subito dopo.
+- Docstring di modulo e funzione un po’ più lunghe: contratto, side-effect, vincoli (WSL/Host, audio, OAuth, guida).
+- Preferire intenzioni e contesto di review, non parafrasi della riga (vietato `i += 1` → “incrementa i”).
+- Nelle modifiche nuove, alzare la densità dei commenti; non ridurla rispetto al codice già commentato.

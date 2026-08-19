@@ -25,23 +25,29 @@ _GMAIL_INTRO_TEXT = (
 
 # Prompt Gemini-first: JSON a un oggetto (contratto del loop), esempi ricchi.
 # Non è il prompt anorettico del master 3B: query libera, niente whitelist keyword.
+# count/tempo: tipi nativi e esempi concreti; niente after:epoch inventato (echo).
 _SYSTEM_PROMPT = (
     "Sei l'assistente vocale Gmail in sola lettura. Rispondi ESCLUSIVAMENTE "
     "con un oggetto JSON valido. "
     "Non usare mai blocchi markdown ```json. Nessun testo prima o dopo il JSON.\n\n"
     "TOOL DISPONIBILI E SCHEMI JSON:\n"
-    '- Elenca email: {"tool": "list_emails", "args": {"query": "string"}}\n'
+    '- Elenca o conta email: {"tool": "list_emails", "args": {"query": "string"}}\n'
     '  Opzionale in args: "limit" integer (default 5, massimo 20).\n'
+    '  Opzionale in args: "count" true per il totale, senza limit.\n'
     '- Leggi un\'email già elencata: {"tool": "read_email", "args": {"name": "string"}}\n'
     '- Risposta parlata: {"tool": "none", "reply": "string"}\n\n'
     "REGOLE TASSATIVE:\n"
     "1. Emetti UN SOLO oggetto JSON con UN SOLO tool per risposta.\n"
     "2. Per elencare o cercare usa list_emails e la chiave query. "
     "Query libera: inbox, operatori Gmail, oppure le parole dell'utente.\n"
-    "3. Per leggere usa read_email e la chiave name: indice parlato "
+    "3. Per contare (quante email) usa list_emails con count true. "
+    "Giorni: newer_than:3d. Ore: italiano in query, mai newer_than:5h. "
+    "Non inventare timestamp Unix.\n"
+    "4. Per leggere usa read_email e la chiave name: indice parlato "
     "(1, la seconda) oppure mittente o oggetto. Non inventare id Gmail.\n"
-    "4. Non puoi inviare, cancellare o modificare email. Solo elenco e lettura.\n"
-    "5. Dopo un Esito OK o ERRORE di un tool, rispondi SEMPRE con tool none "
+    "5. Non puoi inviare, cancellare o modificare email. Solo elenco, "
+    "conteggio e lettura.\n"
+    "6. Dopo un Esito OK o ERRORE di un tool, rispondi SEMPRE con tool none "
     "e la sintesi in reply. Non richiamare lo stesso tool.\n\n"
     "ESEMPI:\n"
     "Utente: ultime email\n"
@@ -54,6 +60,14 @@ _SYSTEM_PROMPT = (
     'JSON: {"tool": "list_emails", "args": {"query": "fattura"}}\n'
     "Utente: mostrami le ultime tre\n"
     'JSON: {"tool": "list_emails", "args": {"query": "inbox", "limit": 3}}\n'
+    "Utente: quante email da Mario\n"
+    'JSON: {"tool": "list_emails", "args": {"query": "from:mario", "count": true}}\n'
+    "Utente: quante da Mario negli ultimi 3 giorni\n"
+    'JSON: {"tool": "list_emails", "args": '
+    '{"query": "from:mario newer_than:3d", "count": true}}\n'
+    "Utente: quante da Mario nelle ultime 5 ore\n"
+    'JSON: {"tool": "list_emails", "args": '
+    '{"query": "from:mario ultime 5 ore", "count": true}}\n'
     "Utente: leggi la seconda\n"
     'JSON: {"tool": "read_email", "args": {"name": "la seconda"}}\n'
     "Utente: leggi quella di Mario\n"
@@ -61,16 +75,19 @@ _SYSTEM_PROMPT = (
     "Esito tool list_emails: OK: 2 email in inbox. "
     "1. Da Mario, oggetto Fattura. 2. Da Anna, oggetto Riunione.\n"
     'JSON: {"tool": "none", "reply": '
-    '"Hai due email: da Mario, fattura, e da Anna, riunione."}'
+    '"Hai due email: da Mario, fattura, e da Anna, riunione."}\n'
+    "Esito tool list_emails: OK: 42 email da mario.\n"
+    'JSON: {"tool": "none", "reply": "Hai 42 email da Mario."}'
 )
 
 
 def _gmail_schema_hint() -> str:
-    """Recovery JSON: stessi tool Gmail, tipi nativi string/integer, niente placeholder."""
+    """Recovery JSON: stessi tool Gmail, tipi nativi string/integer/true, niente placeholder."""
     return (
         "JSON non valido. Emetti UN SOLO oggetto JSON. Schema ammesso: "
         '{"tool":"none","reply":"string"} oppure '
-        '{"tool":"list_emails","args":{"query":"string"}} oppure '
+        '{"tool":"list_emails","args":{"query":"string"}} '
+        "(count true solo se l'utente chiede quante) oppure "
         '{"tool":"read_email","args":{"name":"string"}}.'
     )
 
@@ -116,9 +133,14 @@ def dispatch_gmail_tool(tool: str, args: dict[str, Any]) -> str:
     args_dict = args if isinstance(args, dict) else {}
 
     if tool == _TOOL_LIST:
-        # query libera (operatori o italiano); limit opzionale lo clampano i tool.
+        # query libera (operatori o italiano); limit e count li interpreta list_emails.
+        # count assente = elenco vocale (default 5); count true = totale, sessione intatta.
         query = _as_query(args_dict.get("query", ""))
-        return list_emails(query, limit=args_dict.get("limit"))
+        return list_emails(
+            query,
+            limit=args_dict.get("limit"),
+            count=args_dict.get("count"),
+        )
 
     # Whitelist già filtrata: resta solo read_email. name vuoto → errore parlante.
     name = _as_name(args_dict.get("name"))

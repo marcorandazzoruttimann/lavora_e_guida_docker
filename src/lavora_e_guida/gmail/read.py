@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from email.header import decode_header, make_header
 from email.utils import parseaddr
@@ -36,6 +37,11 @@ GMAIL_MESSAGES_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 # Default vocale: poche email da leggere ad alta voce; cap per non saturare TTS.
 DEFAULT_LIST_LIMIT = 5
 MAX_LIST_LIMIT = 20
+
+# Ramo count: page size massimo Gmail e tetto anti-append su caselle enormi.
+# Oltre COUNT_CAP non si segue più nextPageToken: la reply dice "almeno N".
+COUNT_PAGE_SIZE = 500
+COUNT_CAP = 2000
 
 # Corpo per Gemini: più largo del tetto 3B; il modello riassume in reply.
 MAX_BODY_CHARS = 1500
@@ -88,6 +94,16 @@ _OGGETTO_RE = re.compile(r"(?i)\boggetto\s+(\S+)")
 
 # `da mario` → from:mario; uno token (nomi multi-parola restano a Gemini con from:).
 _DA_FROM_RE = re.compile(r"(?i)\bda\s+([^\s:]+)")
+
+# Ore in italiano: Gmail non ha l'unità `h` su newer_than; serve after:<unix>.
+# Cattura anche “nelle ultime 48 ore” in mezzo a from:mario …
+_HOURS_IT_RE = re.compile(r"(?i)\b(?:nelle\s+)?ultime\s+(\d+)\s+ore\b")
+
+# Giorni in italiano → newer_than:Nd (d/m/y sono le uniche unità Gmail valide).
+_DAYS_IT_RE = re.compile(r"(?i)\b(?:negli\s+)?ultimi\s+(\d+)\s+giorni\b")
+
+# Gemini può inventare newer_than:5h: lo riscriviamo in after:epoch sul processo.
+_NEWER_THAN_HOURS_RE = re.compile(r"(?i)\bnewer_than:(\d+)h\b")
 
 # Stopword per resolve `name`: restano indice, mittente o oggetto.
 _READ_STOPWORDS: frozenset[str] = frozenset(
@@ -247,7 +263,37 @@ def normalize_gmail_query(raw: str) -> str:
         return f"from:{name}"
 
     out = _DA_FROM_RE.sub(_from_repl, out)
+    # Tempo relativo dopo i mapping da/oggetto: ore → after:epoch, giorni → newer_than.
+    out = _expand_relative_time(out)
     return " ".join(out.split())
+
+
+def _hours_ago_to_after(hours: int) -> str:
+    """Orologio del processo: now - N ore in Unix secondi. Mai un epoch del modello."""
+    # int() tronca verso zero: sui timestamp positivi è il grano secondo di Gmail.
+    epoch = int(time.time()) - int(hours) * 3600
+    return f"after:{epoch}"
+
+
+def _expand_relative_time(text: str) -> str:
+    """Italiano/ore inventate → operatori Gmail; giorni già validi restano intatti.
+
+    Gmail accetta newer_than solo con d/m/y. `newer_than:5h` non è valido: si
+    ricalcola after:<unix> qui. `after:YYYY/MM/DD` e `newer_than:3d` passano.
+    """
+
+    def _hours_repl(match: re.Match[str]) -> str:
+        # group(1) è N sia in “ultime 5 ore” sia in newer_than:5h.
+        return _hours_ago_to_after(int(match.group(1)))
+
+    def _days_repl(match: re.Match[str]) -> str:
+        return f"newer_than:{match.group(1)}d"
+
+    # Prima l'operatore inventato, poi le frasi italiane (non si sovrappongono).
+    out = _NEWER_THAN_HOURS_RE.sub(_hours_repl, text)
+    out = _HOURS_IT_RE.sub(_hours_repl, out)
+    out = _DAYS_IT_RE.sub(_days_repl, out)
+    return out
 
 
 def clamp_list_limit(limit: object) -> int:
@@ -264,6 +310,39 @@ def clamp_list_limit(limit: object) -> int:
     if number < 1:
         return 1
     return min(number, MAX_LIST_LIMIT)
+
+
+def _want_count(count: object) -> bool:
+    """True solo per il flag JSON count; un intero o limit non attiva il ramo."""
+    # bool è sottoclasse di int: 1 non deve diventare un conteggio.
+    if count is True:
+        return True
+    if isinstance(count, str) and count.strip().casefold() == "true":
+        return True
+    return False
+
+
+def _count_filter_phrase(gmail_q: str) -> str:
+    """Suffisso parlante del totale: da mittente, non lette, inbox, o niente."""
+    match = re.search(r"(?i)\bfrom:([^\s]+)", gmail_q or "")
+    if match:
+        return f" da {match.group(1)}"
+    q = (gmail_q or "").casefold()
+    if "is:unread" in q:
+        return " non lette"
+    if "in:inbox" in q:
+        return " in inbox"
+    return ""
+
+
+def format_count_result(total: int, gmail_q: str, *, capped: bool) -> str:
+    """Esito parlante del ramo count: numero (o almeno N), senza righe 1. Da …."""
+    phrase = _count_filter_phrase(gmail_q)
+    if total <= 0:
+        return f"OK: nessuna email{phrase}."
+    if capped:
+        return f"OK: almeno {total} email{phrase}."
+    return f"OK: {total} email{phrase}."
 
 
 def _decode_rfc2047(raw: str) -> str:
@@ -564,6 +643,62 @@ def _message_url(gmail_id: str) -> str:
     return f"{GMAIL_MESSAGES_URL}/{gmail_id}"
 
 
+def _message_ids_from_listing(listing: dict[str, Any]) -> list[str]:
+    """Id dalla list API; Gmail omette `messages` se la query non ha match."""
+    raw_ids = listing.get("messages")
+    ids: list[str] = []
+    if not isinstance(raw_ids, list):
+        return ids
+    for entry in raw_ids:
+        if isinstance(entry, dict):
+            mid = entry.get("id")
+            if isinstance(mid, str) and mid.strip():
+                ids.append(mid.strip())
+    return ids
+
+
+def _next_page_token(listing: dict[str, Any]) -> str | None:
+    """Token pagina successiva; assente o blank = ultima pagina."""
+    token = listing.get("nextPageToken")
+    if isinstance(token, str) and token.strip():
+        return token.strip()
+    return None
+
+
+def _count_matching_messages(
+    http: httpx.Client,
+    headers: dict[str, str],
+    gmail_q: str,
+) -> tuple[int, bool]:
+    """Conta gli id su users/me/messages, pagina 500, tetto COUNT_CAP.
+
+    Non fa GET metadata. Ritorna (totale, capped): capped se si supera il tetto
+    o se a COUNT_CAP resta ancora un nextPageToken (casella più grande).
+    """
+    total = 0
+    page_token: str | None = None
+    while True:
+        # maxResults=500 è il massimo Gmail: niente default 5 del ramo elenco.
+        params: dict[str, str | int] = {"q": gmail_q, "maxResults": COUNT_PAGE_SIZE}
+        if page_token:
+            params["pageToken"] = page_token
+        listing = _gmail_get_json(http, GMAIL_MESSAGES_URL, headers, params=params)
+        ids = _message_ids_from_listing(listing)
+        # Pagina vuota: stop anche se Google mandasse un token spurio (anti-loop).
+        if not ids:
+            return total, False
+        if total + len(ids) > COUNT_CAP:
+            return COUNT_CAP, True
+        total += len(ids)
+        next_token = _next_page_token(listing)
+        if total >= COUNT_CAP:
+            # Esattamente il tetto: "almeno" solo se esiste un'altra pagina.
+            return COUNT_CAP, next_token is not None
+        if next_token is None:
+            return total, False
+        page_token = next_token
+
+
 def _load_credentials(
     *,
     credentials: Credentials | None,
@@ -587,20 +722,24 @@ def list_emails(
     query: str = "",
     *,
     limit: object = None,
+    count: object = None,
     session: MailboxSession | None = None,
     client: httpx.Client | None = None,
     settings: Settings | None = None,
     credentials: Credentials | None = None,
 ) -> str:
-    """Elenca messaggi, aggiorna la sessione 1..N, ritorna OK:/ERRORE: parlante.
+    """Elenca o conta messaggi; ritorna OK:/ERRORE: parlante.
 
     `query` libera (operatori Gmail o italiano). `limit` opzionale, default 5 cap 20.
-    Side-effect: GET lista + GET metadata per riga; scrive `session`.
+    `count` true: ignora limit, pagina gli id, non tocca la MailboxSession.
+    Side-effect elenco: GET lista + GET metadata per riga; scrive `session`.
     """
     # Sessione iniettabile per i test; a runtime è quella del processo vocale.
     box = session if session is not None else _SESSION
     # Mapping italiano → q= Gmail; operatori già validi passano invariati.
     gmail_q = normalize_gmail_query(query)
+    counting = _want_count(count)
+    # Il default 5 vale solo per l'elenco vocale, mai per “quante email”.
     max_results = clamp_list_limit(limit)
     owns_client = client is None
     http = client or httpx.Client(timeout=_HTTP_TIMEOUT)
@@ -609,6 +748,10 @@ def list_emails(
             # Token da disco o finto nei test: qui non parte mai InstalledAppFlow.
             creds = _load_credentials(credentials=credentials, settings=settings)
             headers = _auth_headers(creds)
+            if counting:
+                # Solo id + nextPageToken: niente metadata, sessione intatta.
+                total, capped = _count_matching_messages(http, headers, gmail_q)
+                return format_count_result(total, gmail_q, capped=capped)
             listing = _gmail_get_json(
                 http,
                 GMAIL_MESSAGES_URL,
@@ -616,14 +759,7 @@ def list_emails(
                 params={"q": gmail_q, "maxResults": max_results},
             )
             # Inbox vuota: Gmail omette `messages`; non è un errore, è lista vuota.
-            raw_ids = listing.get("messages")
-            ids: list[str] = []
-            if isinstance(raw_ids, list):
-                for entry in raw_ids:
-                    if isinstance(entry, dict):
-                        mid = entry.get("id")
-                        if isinstance(mid, str) and mid.strip():
-                            ids.append(mid.strip())
+            ids = _message_ids_from_listing(listing)
             items: list[MailboxItem] = []
             # N+1: la list API dà solo id; From/Subject arrivano dal dettaglio metadata.
             for gmail_id in ids[:max_results]:

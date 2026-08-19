@@ -21,6 +21,8 @@ from lavora_e_guida.gmail import read as read_mod
 from lavora_e_guida.gmail.agent import GMAIL_LOOP_SPEC, dispatch_gmail_tool
 from lavora_e_guida.gmail.oauth import GMAIL_SCOPES, MSG_GMAIL_NOT_LINKED
 from lavora_e_guida.gmail.read import (
+    COUNT_CAP,
+    COUNT_PAGE_SIZE,
     GMAIL_MESSAGES_URL,
     MAX_BODY_CHARS,
     MSG_EMPTY_LIST,
@@ -29,6 +31,7 @@ from lavora_e_guida.gmail.read import (
     MailboxSession,
     clamp_list_limit,
     extract_message_text,
+    format_count_result,
     get_mailbox_session,
     list_emails,
     normalize_gmail_query,
@@ -186,6 +189,31 @@ def test_normalize_gmail_query_inbox_and_unread() -> None:
     assert normalize_gmail_query("non lette da mario") == "is:unread from:mario"
     assert normalize_gmail_query("fattura") == "fattura"
     assert normalize_gmail_query("oggetto fattura") == "subject:fattura"
+
+
+def test_normalize_gmail_query_hours_to_after_epoch_and_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ore → after:epoch (orologio processo); giorni italiani → newer_than:Nd."""
+    # Epoch del piano: Python deve usare questo now, non un timestamp inventato.
+    frozen = 1_734_567_890
+    monkeypatch.setattr(read_mod.time, "time", lambda: float(frozen))
+    five_hours_ago = frozen - 5 * 3600
+    after_five = f"after:{five_hours_ago}"
+
+    assert normalize_gmail_query("ultime 5 ore") == after_five
+    assert normalize_gmail_query("nelle ultime 5 ore") == after_five
+    assert normalize_gmail_query("from:mario ultime 5 ore") == f"from:mario {after_five}"
+    # newer_than:Nh non è un operatore Gmail: va riscritto come after:epoch.
+    assert normalize_gmail_query("newer_than:5h") == after_five
+    assert normalize_gmail_query("from:mario newer_than:5h") == f"from:mario {after_five}"
+
+    assert normalize_gmail_query("ultimi 3 giorni") == "newer_than:3d"
+    assert normalize_gmail_query("negli ultimi 3 giorni") == "newer_than:3d"
+    assert normalize_gmail_query("from:mario ultimi 3 giorni") == "from:mario newer_than:3d"
+    # Giorni già validi e after: a grano giorno passano invariati.
+    assert normalize_gmail_query("from:mario newer_than:3d") == "from:mario newer_than:3d"
+    assert normalize_gmail_query("after:2024/08/01") == "after:2024/08/01"
 
 
 def test_clamp_list_limit_default_and_cap() -> None:
@@ -435,6 +463,206 @@ def test_list_emails_unread_from_mario_query(tmp_path: Path) -> None:
     )
     assert result.startswith("OK: 1 email non lette.")
     assert "Da Mario, oggetto Fattura." in result
+
+
+def test_format_count_result_phrases() -> None:
+    """Conteggio parlante: da mittente, zero, tetto; niente righe numerate."""
+    assert format_count_result(42, "from:mario", capped=False) == "OK: 42 email da mario."
+    assert format_count_result(0, "from:mario", capped=False) == "OK: nessuna email da mario."
+    assert (
+        format_count_result(COUNT_CAP, "from:mario", capped=True)
+        == f"OK: almeno {COUNT_CAP} email da mario."
+    )
+
+
+def test_list_emails_count_paginates_ids_without_touching_session(tmp_path: Path) -> None:
+    """count=true: due pagine di id, maxResults=500, nessun GET metadata, sessione intatta."""
+    list_calls: list[dict[str, list[str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        # Il ramo count non deve mai chiedere From/Subject per messaggio.
+        assert path.rstrip("/").endswith("/users/me/messages"), path
+        qs = _query_of(request)
+        list_calls.append(qs)
+        assert qs.get("q") == ["from:mario"]
+        assert qs.get("maxResults") == [str(COUNT_PAGE_SIZE)]
+        assert qs.get("maxResults") != ["5"]
+        token = (qs.get("pageToken") or [None])[0]
+        if token is None:
+            return httpx.Response(
+                200,
+                json={
+                    "messages": [{"id": f"p1-{i}"} for i in range(4)],
+                    "nextPageToken": "page2",
+                },
+            )
+        assert token == "page2"
+        return httpx.Response(
+            200,
+            json={"messages": [{"id": f"p2-{i}"} for i in range(3)]},
+        )
+
+    session = MailboxSession()
+    prior = MailboxItem("aaa", "Anna", "Riunione", "Anna <anna@x.test>")
+    session.replace([prior], query="inbox", gmail_q="in:inbox")
+    result = list_emails(
+        "from:mario",
+        count=True,
+        session=session,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+    )
+    assert result == "OK: 7 email da mario."
+    assert "1. Da" not in result
+    assert len(list_calls) == 2
+    assert list_calls[0].get("pageToken") is None
+    assert list_calls[1].get("pageToken") == ["page2"]
+    # “leggi la prima” dopo un conteggio deve ancora vedere l'elenco precedente.
+    assert session.listed
+    assert [item.gmail_id for item in session.items] == ["aaa"]
+    assert session.last_query == "inbox"
+    assert session.last_gmail_q == "in:inbox"
+
+
+def test_list_emails_count_absent_still_defaults_to_five(tmp_path: Path) -> None:
+    """Senza count: elenco vocale resta maxResults=5 e aggiorna la sessione."""
+    list_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal list_calls
+        path = request.url.path
+        qs = _query_of(request)
+        if path.rstrip("/").endswith("/users/me/messages"):
+            list_calls += 1
+            assert qs.get("maxResults") == ["5"]
+            return httpx.Response(200, json={"messages": [{"id": "aaa"}]})
+        return httpx.Response(200, json=_meta("aaa", "Mario <mario@x.test>", "Ciao"))
+
+    session = MailboxSession()
+    result = list_emails(
+        "inbox",
+        session=session,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+    )
+    assert result.startswith("OK: 1 email in inbox.")
+    assert "1. Da Mario, oggetto Ciao." in result
+    assert list_calls == 1
+    assert [item.gmail_id for item in session.items] == ["aaa"]
+
+
+def test_list_emails_count_cap_says_at_least(tmp_path: Path) -> None:
+    """Oltre il tetto: stop alla pagina del cap, reply 'almeno N', sessione intatta."""
+    list_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal list_calls
+        path = request.url.path
+        assert path.rstrip("/").endswith("/users/me/messages"), path
+        qs = _query_of(request)
+        assert qs.get("maxResults") == [str(COUNT_PAGE_SIZE)]
+        list_calls += 1
+        # Ogni pagina è piena e ha un token: il ramo deve fermarsi a COUNT_CAP.
+        start = (list_calls - 1) * COUNT_PAGE_SIZE
+        ids = [{"id": f"m{start + i}"} for i in range(COUNT_PAGE_SIZE)]
+        return httpx.Response(
+            200,
+            json={"messages": ids, "nextPageToken": f"page{list_calls + 1}"},
+        )
+
+    session = MailboxSession()
+    result = list_emails(
+        "from:mario",
+        count=True,
+        session=session,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+    )
+    expected_pages = COUNT_CAP // COUNT_PAGE_SIZE
+    assert list_calls == expected_pages
+    assert result == f"OK: almeno {COUNT_CAP} email da mario."
+    assert not session.listed
+    assert session.items == []
+
+
+def test_list_emails_count_zero_does_not_list(tmp_path: Path) -> None:
+    """Zero match: nessuna email da X; listed resta False (non è un elenco)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        assert path.rstrip("/").endswith("/users/me/messages"), path
+        assert _query_of(request).get("maxResults") == [str(COUNT_PAGE_SIZE)]
+        return httpx.Response(200, json={})
+
+    session = MailboxSession()
+    result = list_emails(
+        "da mario",
+        count=True,
+        session=session,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+    )
+    assert result == "OK: nessuna email da mario."
+    assert not session.listed
+    assert session.items == []
+
+
+def test_list_emails_count_sends_after_epoch_and_newer_than(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """count=true: q= verso Gmail ha after:epoch / newer_than:3d; sessione intatta."""
+    frozen = 1_734_567_890
+    monkeypatch.setattr(read_mod.time, "time", lambda: float(frozen))
+    seen_q: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        # Solo lista id: il ramo count non deve GET metadata per messaggio.
+        assert path.rstrip("/").endswith("/users/me/messages"), path
+        qs = _query_of(request)
+        assert qs.get("maxResults") == [str(COUNT_PAGE_SIZE)]
+        assert qs.get("maxResults") != ["5"]
+        seen_q.append((qs.get("q") or [""])[0])
+        return httpx.Response(200, json={"messages": [{"id": "m1"}, {"id": "m2"}]})
+
+    session = MailboxSession()
+    prior = MailboxItem("aaa", "Anna", "Riunione", "Anna <anna@x.test>")
+    session.replace([prior], query="inbox", gmail_q="in:inbox")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    settings = _settings(tmp_path)
+    creds = _creds()
+
+    days_result = list_emails(
+        "from:mario ultimi 3 giorni",
+        count=True,
+        session=session,
+        client=client,
+        settings=settings,
+        credentials=creds,
+    )
+    assert days_result == "OK: 2 email da mario."
+    assert seen_q[-1] == "from:mario newer_than:3d"
+
+    hours_result = list_emails(
+        "from:mario ultime 5 ore",
+        count=True,
+        session=session,
+        client=client,
+        settings=settings,
+        credentials=creds,
+    )
+    assert hours_result == "OK: 2 email da mario."
+    assert seen_q[-1] == f"from:mario after:{frozen - 5 * 3600}"
+    # Un conteggio temporale non deve sovrascrivere l'elenco vocale precedente.
+    assert session.listed
+    assert [item.gmail_id for item in session.items] == ["aaa"]
+    assert session.last_gmail_q == "in:inbox"
 
 
 def test_list_emails_http_401_speaks_desktop_auth(tmp_path: Path) -> None:
