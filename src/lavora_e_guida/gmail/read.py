@@ -1,9 +1,11 @@
-"""Tool Gmail in sola lettura: elenco e corpo TTS, id Gmail solo in Python.
+"""Tool Gmail in sola lettura: elenco, corpo TTS e salvataggio allegati.
 
-Gemini (o Ollama) formula JSON `list_emails` / `read_email`; questo modulo
-esegue la REST Gmail via httpx e parla all'utente. Gli id messaggio non
-sono parlabili: restano nella MailboxSession in-process (mappa 1..N).
-Mai un browser: token assente o HTTP 401 → GmailAuthError già parlante.
+Gemini (o Ollama) formula JSON `list_emails` / `read_email` / `save_attachments`;
+questo modulo esegue la REST Gmail via httpx e parla all'utente. Gli id
+messaggio non sono parlabili: restano nella MailboxSession in-process (mappa
+1..N). Mai un browser: token assente o HTTP 401 → GmailAuthError già parlante.
+`save_attachments` scrive sotto WORKSPACE_ROOT/email_attachments/YYYY-MM-DD/,
+non in inbox/ (PDF importati a mano dal master).
 """
 
 from __future__ import annotations
@@ -13,17 +15,20 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from email.header import decode_header, make_header
 from email.utils import parseaddr
 from html import unescape
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 
 import httpx
 from google.oauth2.credentials import Credentials
 from rapidfuzz import fuzz, process
 
-from lavora_e_guida.config import Settings
+# Dirname unico: write Gmail e skip RAG/resolver condividono EMAIL_ATTACHMENTS_DIRNAME.
+from lavora_e_guida.config import EMAIL_ATTACHMENTS_DIRNAME, WORKSPACE_ROOT, Settings
 from lavora_e_guida.gmail.oauth import (
     MSG_GMAIL_NOT_LINKED,
     MSG_PROFILE_UNREACHABLE,
@@ -45,6 +50,33 @@ COUNT_CAP = 2000
 
 # Corpo per Gemini: più largo del tetto 3B; il modello riassume in reply.
 MAX_BODY_CHARS = 1500
+
+# Tetto a file: oltre non si scarica, gli altri allegati della stessa mail sì.
+MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
+
+# Zero file veri (solo logo/firma) o tutti saltati senza write: stessa formula.
+MSG_NO_ATTACHMENTS = "OK: nessun allegato."
+
+# Caratteri vietati sui nomi file Windows (NTFS + Desktop montato in WSL).
+_WIN_FORBIDDEN_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Device reserved Windows: CON.txt sul Desktop rompe Explorer, non il TTS.
+_WIN_RESERVED_STEMS: frozenset[str] = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{i}" for i in range(1, 10)),
+        *(f"lpt{i}" for i in range(1, 10)),
+    }
+)
+
+# Fallback se il filename Gmail è vuoto o diventa vuoto dopo la sanitizzazione.
+_FALLBACK_ATTACHMENT_NAME = "allegato"
+
+# Tetto sul basename: lascia spazio a `_2` e al path `email_attachments/YYYY-MM-DD/`.
+_MAX_ATTACHMENT_FILENAME_LEN = 200
 
 # Stesso ordine di grandezza del resolver FS: sotto soglia → niente match azzardato.
 _FUZZY_THRESHOLD = 70
@@ -167,9 +199,36 @@ _INDEX_WORDS: dict[str, int] = {
 # Solo cifre, eventualmente “numero 2” già pulito dalle stopword.
 _DIGITS_RE = re.compile(r"^\d+$")
 
+# Logo/pixel/firma: sotto questa soglia un'immagine senza disposition=attachment
+# non si annuncia (Gmail metadata dà body.size in byte, senza scaricare il binario).
+_SMALL_IMAGE_MAX_BYTES = 40 * 1024
+
+# Corpo HTML/plain: anche con filename spurio restano testo, non file da nominare.
+_BODY_MIME_TYPES: frozenset[str] = frozenset({"text/plain", "text/html"})
+
+# Nomi tipici di firma/logo Outlook e newsletter; IGNORECASE, estensione opzionale.
+# image001.png (cifre obbligatorie) ≠ image.png, che può essere una foto vera.
+_DECORATIVE_FILENAME_RE = re.compile(
+    r"(?i)^(logo|signature|untitled)(?:\.[^.]+)?$|^image\d+",
+)
+
 
 class GmailReadError(ValueError):
     """Contratto tool lettura (lista vuota, name assente): messaggio per il TTS."""
+
+
+@dataclass(frozen=True)
+class RealAttachment:
+    """Allegato vero (non logo/inline): metadati da format=metadata o full.
+
+    `attachment_id` serve al GET binario (save_attachments); qui lo conserviamo
+    così elenco, lettura e salvataggio condividono la stessa classificazione.
+    """
+
+    filename: str
+    mime_type: str
+    size: int = 0
+    attachment_id: str = ""
 
 
 @dataclass
@@ -181,14 +240,16 @@ class MailboxItem:
     subject: str
     # Header From grezzo: il fuzzy può matchare anche l'indirizzo, non solo il display.
     from_header: str = ""
+    # Quanti allegati veri (stessa euristica di read/save); 0 = niente suffisso TTS.
+    attachment_count: int = 0
 
 
 @dataclass
 class MailboxSession:
-    """Stato in-process tra list_emails e read_email (un turno vocale dopo l'altro).
-    
-        E' lo stato intermedio tra un tool e l'altro, come se fosse uno storico delle 
-        email recuperate (da leggere) e di queste, quelle già lette o da leggere
+    """Stato in-process tra list_emails e read/save (un turno vocale dopo l'altro).
+
+    È lo stato intermedio tra un tool e l'altro, come se fosse uno storico delle
+    email recuperate (da leggere o da cui scaricare allegati).
     """
 
     items: list[MailboxItem] = field(default_factory=list)
@@ -395,16 +456,23 @@ def _header_map(payload: dict[str, Any]) -> dict[str, str]:
     return found
 
 
-def _b64url_decode(data: str) -> str:
-    """Corpo Gmail: base64url, padding spesso assente, testo UTF-8 con replace."""
+def _b64url_decode_bytes(data: str) -> bytes:
+    """Binario Gmail (allegati): base64url, padding spesso assente. Vuoto se rotto."""
+    # Gmail omette il padding `=`; urlsafe_b64decode lo pretende, quindi lo ricalcoliamo.
     compact = "".join((data or "").split())
     if not compact:
-        return ""
-    # urlsafe_b64decode esige lunghezza multipla di 4.
+        return b""
     padded = compact + "=" * ((4 - len(compact) % 4) % 4)
     try:
-        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        return base64.urlsafe_b64decode(padded.encode("ascii"))
     except (ValueError, UnicodeEncodeError):
+        return b""
+
+
+def _b64url_decode(data: str) -> str:
+    """Corpo Gmail: base64url, padding spesso assente, testo UTF-8 con replace."""
+    raw = _b64url_decode_bytes(data)
+    if not raw:
         return ""
     return raw.decode("utf-8", errors="replace")
 
@@ -479,6 +547,266 @@ def _iter_parts(payload: dict[str, Any]) -> list[tuple[str, str]]:
     return found
 
 
+def _part_mime(part: dict[str, Any]) -> str:
+    """mimeType Gmail in minuscolo; vuoto se assente o non stringa."""
+    mime = part.get("mimeType")
+    return mime.strip().casefold() if isinstance(mime, str) else ""
+
+
+def _part_filename(part: dict[str, Any]) -> str:
+    """Campo filename del MessagePart (non l'header MIME); strip, niente placeholder."""
+    raw = part.get("filename")
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip()
+
+
+def _part_size_bytes(part: dict[str, Any]) -> int:
+    """body.size da metadata/full: byte dichiarati, 0 se manca (non scarichiamo)."""
+    body = part.get("body")
+    if not isinstance(body, dict):
+        return 0
+    size = body.get("size")
+    try:
+        return max(0, int(size))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _part_attachment_id(part: dict[str, Any]) -> str:
+    """Id per users.messages.attachments.get; vuoto sui pezzi solo-testo."""
+    body = part.get("body")
+    if not isinstance(body, dict):
+        return ""
+    aid = body.get("attachmentId")
+    return aid.strip() if isinstance(aid, str) else ""
+
+
+def _part_disposition(headers: dict[str, str]) -> str:
+    """Primo token di Content-Disposition: attachment, inline, o vuoto."""
+    # Gmail mette "attachment; filename=..." : ci basta il verbo, non il name=.
+    raw = headers.get("content-disposition", "")
+    token = raw.split(";", 1)[0].strip().casefold()
+    return token
+
+
+def _is_decorative_filename(filename: str) -> bool:
+    """True per logo/firma/untitled/image001: non si parlano né si scaricano."""
+    # Solo il basename: un path spurio non deve far passare logo.png.
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not base:
+        return True
+    return _DECORATIVE_FILENAME_RE.search(base) is not None
+
+
+def _is_real_attachment_part(part: dict[str, Any]) -> bool:
+    """Euristica unica elenco/lettura/salvataggio: True solo per file da nominare.
+
+    Vero: filename + disposition attachment, oppure non-immagine con filename
+    (pdf/doc/zip anche senza disposition). Falso: inline/cid image/*, nomi
+    logo/image001/signature/untitled, immagini < 40 KiB senza attachment.
+    """
+    filename = _part_filename(part)
+    # Senza filename non c'è nulla da annunciare (multipart container, corpo nudo).
+    if not filename:
+        return False
+    mime = _part_mime(part)
+    headers = _header_map(part)
+    disposition = _part_disposition(headers)
+    # text/plain e text/html sono il corpo: un .txt vero arriva come attachment.
+    if mime in _BODY_MIME_TYPES and disposition != "attachment":
+        return False
+    if _is_decorative_filename(filename):
+        return False
+    is_image = mime.startswith("image/")
+    has_cid = bool(headers.get("content-id", "").strip())
+    # Logo, pixel tracking, firma HTML: inline o cid + immagine, mai in TTS.
+    if is_image and (disposition == "inline" or has_cid):
+        return False
+    size = _part_size_bytes(part)
+    # Foto minuscola senza attachment: quasi sempre icona; la soglia è sui metadata.
+    if is_image and disposition != "attachment" and size < _SMALL_IMAGE_MAX_BYTES:
+        return False
+    if disposition == "attachment":
+        return True
+    # pdf/doc/zip/csv: i client omettono spesso Content-Disposition.
+    if not is_image:
+        return True
+    # Immagine grande, non inline/cid, con filename: foto allegata senza disposition.
+    return True
+
+
+def iter_real_attachments(payload: dict[str, Any] | None) -> list[RealAttachment]:
+    """Cammina il MIME (metadata o full) e tiene solo gli allegati veri.
+
+    format=metadata basta: filename, mimeType, body.size, header disposition.
+    Non scarica il binario. Stessa lista per list_emails, read_email, save.
+    """
+
+    found: list[RealAttachment] = []
+
+    def _walk(node: dict[str, Any]) -> None:
+        # Prima il nodo corrente (messaggio single-part = PDF nudo), poi i figli.
+        if _is_real_attachment_part(node):
+            found.append(
+                RealAttachment(
+                    filename=_part_filename(node),
+                    mime_type=_part_mime(node),
+                    size=_part_size_bytes(node),
+                    attachment_id=_part_attachment_id(node),
+                )
+            )
+        children = node.get("parts")
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    _walk(child)
+
+    if isinstance(payload, dict):
+        _walk(payload)
+    return found
+
+
+def speak_list_attachment_suffix(count: int) -> str:
+    """Suffisso riga elenco: ', 1 allegato' / ', N allegati' / vuoto. Niente nomi."""
+    if count <= 0:
+        return ""
+    if count == 1:
+        return ", 1 allegato"
+    return f", {count} allegati"
+
+
+def speak_read_attachment_suffix(attachments: list[RealAttachment]) -> str:
+    """Suffisso lettura: conta e filename, così Gemini non inventa un PDF."""
+    if not attachments:
+        return ""
+    names = ", ".join(item.filename for item in attachments)
+    n = len(attachments)
+    if n == 1:
+        return f", 1 allegato {names}"
+    return f", {n} allegati {names}"
+
+
+def _local_today() -> date:
+    """Giorno civile sull'orologio locale del processo (WSL), non UTC né Date Gmail."""
+    # now aware in UTC, poi astimezone() → TZ di sistema (stesso giorno di date.today).
+    return datetime.now(tz=UTC).astimezone().date()
+
+
+def sanitize_attachment_filename(raw: str) -> str:
+    """Basename sicuro per il Desktop Windows: niente path, `..`, caratteri vietati.
+
+    Gmail può mandare `../evil.pdf` o `C:\\Windows\\x.pdf` nel campo filename:
+    teniamo solo l'ultimo segmento, sostituiamo `<>:\"/\\|?*` e i control char,
+    evictiamo i device reserved (CON/PRN/…). Mai un path relativo sotto la
+    cartella del giorno. Vuoto dopo la pulizia → `allegato`.
+    """
+    text = (raw or "").strip()
+    # Slash e backslash: solo l'ultimo pezzo, così `../../passwd` diventa `passwd`.
+    text = text.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    # `.` e `..` da soli non sono un file: cadrebbero sulla cartella padre.
+    if text in {"", ".", ".."}:
+        return _FALLBACK_ATTACHMENT_NAME
+    # NTFS rifiuta questi caratteri; sul mount /mnt/c rompono anche Explorer.
+    text = _WIN_FORBIDDEN_RE.sub("_", text)
+    # Bordi `_` `.` spazio: Windows non ama trailing dot/space sul basename.
+    text = re.sub(r"_+", "_", text).strip(" ._")
+    if not text:
+        return _FALLBACK_ATTACHMENT_NAME
+    # Tetto sul nome, non sul path completo: `_2` e la data devono ancora starci.
+    if len(text) > _MAX_ATTACHMENT_FILENAME_LEN:
+        suffix = Path(text).suffix[:20]
+        stem_budget = _MAX_ATTACHMENT_FILENAME_LEN - len(suffix)
+        stem = Path(text).stem[: max(1, stem_budget)]
+        text = f"{stem}{suffix}" if suffix else stem
+    stem = Path(text).stem
+    # CON.txt sul Desktop è un device: prefisso `_` così resta parlabile.
+    if stem.casefold() in _WIN_RESERVED_STEMS:
+        text = f"_{text}"
+    return text
+
+
+def attachments_day_dir(
+    *,
+    workspace: Path | None = None,
+    today: date | None = None,
+) -> Path:
+    """Crea (idempotente) WORKSPACE_ROOT/email_attachments/YYYY-MM-DD/.
+
+    La data è l'orologio locale del processo, non la data del messaggio Gmail.
+    Crea WORKSPACE_ROOT se manca; non crea notes/ né inbox/ (quelli sono del master).
+    """
+    # Iniettabile nei test: il default è lo snapshot importato da config.
+    root = Path(workspace if workspace is not None else WORKSPACE_ROOT)
+    # Giorno civile sull'orologio locale del processo WSL, non UTC né Date header.
+    day = today if today is not None else _local_today()
+    folder = root / EMAIL_ATTACHMENTS_DIRNAME / day.isoformat()
+    # parents=True: manca Ollama_test e/o email_attachments → le ricreiamo.
+    folder.mkdir(parents=True, exist_ok=True)
+    resolved_root = root.resolve()
+    resolved_folder = folder.resolve()
+    # Difesa extra: un symlink malevolo non deve farci scrivere fuori dal workspace.
+    try:
+        resolved_folder.relative_to(resolved_root)
+    except ValueError as exc:
+        raise GmailReadError("ERRORE: cartella allegati fuori dal workspace") from exc
+    return resolved_folder
+
+
+def _unique_attachment_path(directory: Path, filename: str) -> Path:
+    """Se il nome esiste già nel giorno, suffisso `_2`, `_3` prima dell'estensione."""
+    # Figlio diretto della cartella del giorno: niente sotto-cartelle dal filename.
+    first = directory / filename
+    if not first.exists():
+        return first
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    # Il primo file tiene il nome originale (è quello che il TTS deve pronunciare).
+    for index in range(2, 1000):
+        candidate = directory / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    # Tetto anti-loop: meglio un errore parlante che appendere all'infinito.
+    raise GmailReadError("ERRORE: troppi file con lo stesso nome nella cartella del giorno")
+
+
+def format_save_attachments_result(
+    day_stamp: str,
+    saved_names: list[str],
+    *,
+    n_too_big: int = 0,
+    n_undownloadable: int = 0,
+) -> str:
+    """Esito TTS del salvataggio: path relativo parlante, skip senza bloccare.
+
+    Con file scritti: `OK: N allegati salvati in email_attachments/YYYY-MM-DD: a, b.`
+    Zero write: `OK: nessun allegato.` più eventuale `1 troppo grande, saltato`.
+    """
+    if saved_names:
+        folder = f"{EMAIL_ATTACHMENTS_DIRNAME}/{day_stamp}"
+        names = ", ".join(saved_names)
+        n = len(saved_names)
+        if n == 1:
+            header = f"OK: 1 allegato salvato in {folder}: {names}."
+        else:
+            header = f"OK: {n} allegati salvati in {folder}: {names}."
+    else:
+        header = MSG_NO_ATTACHMENTS
+    extras: list[str] = []
+    if n_too_big == 1:
+        extras.append("1 troppo grande, saltato")
+    elif n_too_big > 1:
+        extras.append(f"{n_too_big} troppo grandi, saltati")
+    if n_undownloadable == 1:
+        extras.append("1 non scaricabile, saltato")
+    elif n_undownloadable > 1:
+        extras.append(f"{n_undownloadable} non scaricabili, saltati")
+    if not extras:
+        return header
+    # Header ha già il punto finale: lo teniamo e accodiamo gli skip parlanti.
+    return f"{header} {' '.join(f'{item}.' for item in extras)}"
+
+
 def extract_message_text(message: dict[str, Any]) -> str:
     """Preferisce text/plain; se manca, HTML strip; poi snippet API. Mai id/MIME."""
     payload = message.get("payload")
@@ -517,14 +845,18 @@ def item_from_message(message: dict[str, Any]) -> MailboxItem | None:
     if not isinstance(gmail_id, str) or not gmail_id.strip():
         return None
     payload = message.get("payload")
-    headers = _header_map(payload) if isinstance(payload, dict) else {}
+    payload_dict = payload if isinstance(payload, dict) else {}
+    headers = _header_map(payload_dict) if payload_dict else {}
     from_raw = headers.get("from", "")
     subject_raw = headers.get("subject", "")
+    # Stessa euristica della lettura: in lista basta metadata (filename/size).
+    attachment_count = len(iter_real_attachments(payload_dict))
     return MailboxItem(
         gmail_id=gmail_id.strip(),
         sender=_speaker_from_header(from_raw),
         subject=_subject_from_header(subject_raw),
         from_header=from_raw,
+        attachment_count=attachment_count,
     )
 
 
@@ -543,7 +875,10 @@ def format_list_result(items: list[MailboxItem], gmail_q: str) -> str:
     if not items:
         return "OK: nessuna email trovata."
     numbered = " ".join(
-        f"{index}. Da {item.sender}, oggetto {item.subject}."
+        (
+            f"{index}. Da {item.sender}, oggetto {item.subject}"
+            f"{speak_list_attachment_suffix(item.attachment_count)}."
+        )
         for index, item in enumerate(items, start=1)
     )
     return f"{_speak_list_prefix(len(items), gmail_q)} {numbered}"
@@ -641,6 +976,39 @@ def _gmail_get_json(
 def _message_url(gmail_id: str) -> str:
     """Dettaglio users/me/messages/{id}; l'id resta nel path HTTP, non nel TTS."""
     return f"{GMAIL_MESSAGES_URL}/{gmail_id}"
+
+
+def _attachment_url(gmail_id: str, attachment_id: str) -> str:
+    """GET binario users/me/messages/{id}/attachments/{aid}; id mai in TTS."""
+    # Stesso host della list: gmail.readonly copre questo GET, non serve modify.
+    return f"{GMAIL_MESSAGES_URL}/{gmail_id}/attachments/{attachment_id}"
+
+
+def _fetch_attachment_bytes(
+    http: httpx.Client,
+    headers: dict[str, str],
+    gmail_id: str,
+    attachment_id: str,
+) -> bytes | None:
+    """Scarica il binario di un allegato; None se manca o il payload è rotto.
+
+    401/403 restano GmailAuthError (abort dell'intero tool). 404 o data assente
+    → None, così gli altri file della stessa email si salvano comunque.
+    """
+    try:
+        resource = _gmail_get_json(
+            http,
+            _attachment_url(gmail_id, attachment_id),
+            headers,
+        )
+    except GmailReadError:
+        # MSG_GONE sul singolo file: non cancelliamo il resto del salvataggio.
+        return None
+    data = resource.get("data")
+    if not isinstance(data, str) or not data.strip():
+        return None
+    blob = _b64url_decode_bytes(data)
+    return blob if blob else None
 
 
 def _message_ids_from_listing(listing: dict[str, Any]) -> list[str]:
@@ -761,7 +1129,8 @@ def list_emails(
             # Inbox vuota: Gmail omette `messages`; non è un errore, è lista vuota.
             ids = _message_ids_from_listing(listing)
             items: list[MailboxItem] = []
-            # N+1: la list API dà solo id; From/Subject arrivano dal dettaglio metadata.
+            # N+1: id dalla list; From/Subject e flag allegati dal dettaglio metadata
+            # (filename/size/disposition, niente body). Non serve format=full per riga.
             for gmail_id in ids[:max_results]:
                 detail = _gmail_get_json(
                     http,
@@ -800,6 +1169,7 @@ def read_email(
 
     Senza list_emails prima → ERRORE: prima elenca le email.
     Preferisce text/plain; altrimenti HTML strip; tronca ~1500 caratteri.
+    Header parlante: se ci sono allegati veri, conta e nomi file (non i logo).
     """
     box = session if session is not None else _SESSION
     # Name blank: niente resolve né GET; il modello deve ripetere con un indice.
@@ -826,9 +1196,110 @@ def read_email(
                 return MSG_EMPTY_BODY
             spoken, truncated = truncate_tts_body(body, max_chars=max_chars)
             note = " (troncato)" if truncated else ""
-            return (
-                f"OK: email da {item.sender}, oggetto {item.subject}{note}.\n{spoken}"
+            # Payload full: stessi veri della lista, ma qui nominiamo i file a Gemini.
+            payload = detail.get("payload")
+            attach = speak_read_attachment_suffix(
+                iter_real_attachments(payload if isinstance(payload, dict) else None)
             )
+            return (
+                f"OK: email da {item.sender}, oggetto {item.subject}{attach}{note}.\n{spoken}"
+            )
+        except (GmailAuthError, GmailReadError) as exc:
+            return _spoken_error(exc)
+    finally:
+        if owns_client:
+            http.close()
+
+
+def save_attachments(
+    name: str,
+    *,
+    session: MailboxSession | None = None,
+    client: httpx.Client | None = None,
+    settings: Settings | None = None,
+    credentials: Credentials | None = None,
+    workspace: Path | None = None,
+    today: date | None = None,
+) -> str:
+    """Scarica gli allegati veri dell'email risolta sulla ultima lista.
+
+    Stesso `name` di `read_email` (indice o mittente). Senza elenco → stesso
+    ERRORE. Solo file classificati da `iter_real_attachments` (niente logo/cid).
+    Side-effect: GET `attachments.get` + write sotto email_attachments/oggi/.
+    Non chiama `ensure_workspace`: niente notes/ né inbox/. Tetto 15 MiB a file:
+    skip parlante, gli altri si salvano. Path traversal nel filename → sanitizza.
+    """
+    box = session if session is not None else _SESSION
+    # Name blank: niente resolve né GET; il modello deve ripetere con un indice.
+    if not (name or "").strip():
+        return MSG_EMPTY_NAME
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_HTTP_TIMEOUT)
+    try:
+        try:
+            # Indice o fuzzy sulla ultima lista; l'id Gmail non esce da qui.
+            item = resolve_listed_item(name, box)
+            creds = _load_credentials(credentials=credentials, settings=settings)
+            headers = _auth_headers(creds)
+            # format=full: attachmentId (e body.data sui pezzi piccoli) senza N GET.
+            detail = _gmail_get_json(
+                http,
+                _message_url(item.gmail_id),
+                headers,
+                params={"format": "full"},
+            )
+            payload = detail.get("payload")
+            reals = iter_real_attachments(payload if isinstance(payload, dict) else None)
+            # Solo logo/firma: stessa formula della lettura senza suffisso, zero disco.
+            if not reals:
+                return MSG_NO_ATTACHMENTS
+
+            day = today if today is not None else _local_today()
+            # mkdir solo al primo write: tutti skip (troppo grandi) non lasciano cartelle vuote.
+            day_dir: Path | None = None
+            saved_names: list[str] = []
+            n_too_big = 0
+            n_undownloadable = 0
+            for att in reals:
+                # Metadata size prima del GET: non scarichiamo un 20 MiB per poi skippare.
+                if att.size > MAX_ATTACHMENT_BYTES:
+                    n_too_big += 1
+                    continue
+                if not att.attachment_id:
+                    # Senza attachmentId Gmail non espone il binario su questo pezzo.
+                    n_undownloadable += 1
+                    continue
+                blob = _fetch_attachment_bytes(http, headers, item.gmail_id, att.attachment_id)
+                if blob is None:
+                    n_undownloadable += 1
+                    continue
+                # Metadata bugiardo: il tetto vale anche sui byte reali decodificati.
+                if len(blob) > MAX_ATTACHMENT_BYTES:
+                    n_too_big += 1
+                    continue
+                if day_dir is None:
+                    day_dir = attachments_day_dir(workspace=workspace, today=day)
+                safe_name = sanitize_attachment_filename(att.filename)
+                dest = _unique_attachment_path(day_dir, safe_name)
+                # Ultimo check: il resolve non deve uscire dalla cartella del giorno.
+                try:
+                    dest.resolve().relative_to(day_dir)
+                except ValueError:
+                    n_undownloadable += 1
+                    continue
+                dest.write_bytes(blob)
+                # TTS usa il nome scritto (sanitizzato / _2), non il filename Gmail crudo.
+                saved_names.append(dest.name)
+            return format_save_attachments_result(
+                day.isoformat(),
+                saved_names,
+                n_too_big=n_too_big,
+                n_undownloadable=n_undownloadable,
+            )
+        except OSError as exc:
+            # Disco pieno / Desktop non montato: parlante, niente stacktrace.
+            return _spoken_error(exc)
         except (GmailAuthError, GmailReadError) as exc:
             return _spoken_error(exc)
     finally:

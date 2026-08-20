@@ -18,6 +18,8 @@ from pathlib import Path
 
 from rapidfuzz import fuzz, process
 
+from lavora_e_guida.config import is_index_skipped_rel
+
 # Stopword di comando/STT italiano: rumore da togliere prima del match sullo stem.
 # Ordine lungo→corto nelle frasi multi-token gestito a parte (estensioni pronunciate).
 # Include verbi di lettura e di append_note (“aggiungi/aggiorna … spesa”).
@@ -232,12 +234,14 @@ def _scan_stem_map(workspace_dir: Path) -> dict[str, list[Path]]:
 
     Solo `is_file()`; directory ignorate. Collisioni stesso stem → lista
     (es. `notes/spesa.txt` e `inbox/spesa.pdf`).
+    `email_attachments/` è esclusa: stesso contratto dello skip RAG.
     Chiave = `_number_canonical_key(stem)` così `progetto_03` ≡ `progetto_3`.
     """
     root = workspace_dir.resolve()
     stem_map: dict[str, list[Path]] = {}
 
     # rglob: ricorsivo sotto notes/, inbox/, eventuali sotto-cartelle.
+    # Stesso skip RAG: email_attachments/ non è candidato per read_file/append_note.
     for abs_path in root.rglob("*"):
         # Solo file regolari: niente directory né symlink rotto come “file”.
         if not abs_path.is_file():
@@ -247,6 +251,9 @@ def _scan_stem_map(workspace_dir: Path) -> dict[str, list[Path]]:
             rel = abs_path.relative_to(root)
         except ValueError:
             # Fuori root (symlink): skip silenzioso, non è candidato sicuro.
+            continue
+        # Fatture Gmail: find_file/read_file non devono collassare su di esse.
+        if is_index_skipped_rel(rel):
             continue
         # Chiave numerica-aware: parola/cifra/padding non devono cambiare il match.
         key = _number_canonical_key(abs_path.stem)

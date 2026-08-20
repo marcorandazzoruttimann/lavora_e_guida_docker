@@ -2,18 +2,19 @@
 
 Ecosistema agentico vocale hands-free: orchestratore in WSL2, I/O audio sul Windows host.
 
-Loop attuale: Mock/HTTP STT → LLM locale (Ollama) o Gemini → tool filesystem/RAG sul Desktop → TTS.
+Loop attuale: Mock/HTTP STT → Gemini (default) o Ollama (backup) → tool filesystem/RAG sul Desktop → TTS.
 
 ## Quick start (Mock, senza microfono)
 
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
+# Serve GEMINI_API_KEY in `.env`
 lavora-e-guida
 # Digita una frase (crea/aggiorna/leggi/cerca file), poi `esci`.
 ```
 
-Equivalente: `python -m lavora_e_guida`. Provider cloud: `lavora-e-guida --llm gemini` (serve `GEMINI_API_KEY` in `.env`).
+Equivalente: `python -m lavora_e_guida`. Backup locale: `lavora-e-guida --llm ollama`. Gmail: `lavora-e-guida --agent gmail`.
 
 ## Workspace e indice
 

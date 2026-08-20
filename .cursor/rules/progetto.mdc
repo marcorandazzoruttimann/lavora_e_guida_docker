@@ -1,11 +1,15 @@
 ---
-description: Direttive globali del progetto lavora_e_guida (lingua e stile commenti)
+description: Direttive globali del progetto lavora_e_guida (lingua, commenti, LLM Gemini)
 alwaysApply: true
 ---
 
 # Direttive di progetto (sempre)
 
 Valgono per l’intero repo e per ogni agente Cursor che lavora su questo progetto.
+
+## 0. LLM di prodotto: Gemini
+
+Ragionare e progettare per **Gemini** (default). Qwen 3B / Ollama è solo prova di studio o backup. Dettaglio prompt/tool/RAG: regola `llm_guidelines.mdc`.
 
 ## 1. Discussioni solo in italiano
 

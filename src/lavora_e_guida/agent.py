@@ -545,12 +545,12 @@ def _run_chat_loop_body(
 
 
 def build_llm(
-    provider: Literal["ollama", "gemini"] = "ollama",
+    provider: Literal["ollama", "gemini"] = "gemini",
     model: str | None = None,
 ) -> LocalOllama | GeminiChat:
-    """Factory provider: ollama (default) oppure gemini (stesso contratto chat).
+    """Factory provider: gemini (default di prodotto) oppure ollama (backup).
 
-    `model` None → OLLAMA_MODEL oppure GEMINI_MODEL (env / default gemini-3.5-flash).
+    `model` None → GEMINI_MODEL oppure OLLAMA_MODEL (env / default gemini-3.5-flash).
     """
     if provider == "gemini":
         # Timeout generoso: rete pubblica + eventuale cold start lato API.

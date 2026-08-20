@@ -10,8 +10,10 @@ chromadb = pytest.importorskip("chromadb")
 
 from lavora_e_guida.rag.chroma_store import ChromaStore
 from lavora_e_guida.rag.index_db import IndexDB, db_path
+from lavora_e_guida.config import EMAIL_ATTACHMENTS_DIRNAME
 from lavora_e_guida.rag.index_sync import (
     file_content_hash,
+    iter_indexable_files,
     sync_workspace_index,
     upsert_indexed_file,
 )
@@ -125,3 +127,84 @@ def test_upsert_single_file_after_write(dual_paths: tuple[Path, Path]) -> None:
 
     changed_again = upsert_indexed_file(data_ws, "notes/hook.txt", index_root=index_root)
     assert changed_again is False
+
+
+def test_iter_indexable_files_skips_email_attachments(tmp_path: Path) -> None:
+    """rglob: notes/ entra, email_attachments/ (anche .txt/.pdf) no."""
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "spesa.txt").write_text("latte\n", encoding="utf-8")
+    # Stesso suffix indicizzabile, ma sotto la cartella Gmail del giorno.
+    day = tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19"
+    day.mkdir(parents=True)
+    (day / "fattura.pdf").write_bytes(b"%PDF-1.4 skip")
+    (day / "promemoria.txt").write_text("importo fattura acme\n", encoding="utf-8")
+    # Omonimo nella cartella note: deve restare candidato (non è la dir skip).
+    (notes / "email_attachments.txt").write_text("meta\n", encoding="utf-8")
+
+    rels = {p.relative_to(tmp_path.resolve()).as_posix() for p in iter_indexable_files(tmp_path)}
+    assert "notes/spesa.txt" in rels
+    assert "notes/email_attachments.txt" in rels
+    assert f"{EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19/fattura.pdf" not in rels
+    assert f"{EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19/promemoria.txt" not in rels
+
+
+def test_sync_does_not_index_email_attachments(dual_paths: tuple[Path, Path]) -> None:
+    """Sync globale: solo la nota in SQLite; gli allegati Gmail non diventano chunk."""
+    data_ws, index_root = dual_paths
+    notes = data_ws / "notes"
+    notes.mkdir()
+    (notes / "spesa.txt").write_text("latte pane\n", encoding="utf-8")
+    day = data_ws / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19"
+    day.mkdir(parents=True)
+    (day / "promemoria.txt").write_text("fattura acme 120 euro\n", encoding="utf-8")
+
+    stats = sync_workspace_index(data_ws, index_root=index_root)
+    assert stats.scanned == 1
+    assert stats.upserted == 1
+
+    with IndexDB(index_root) as db:
+        assert db.get_file("notes/spesa.txt") is not None
+        assert db.get_file(f"{EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19/promemoria.txt") is None
+
+    store = ChromaStore(index_root)
+    hits = store.query("fattura acme", n_results=3)
+    assert all(EMAIL_ATTACHMENTS_DIRNAME not in (h.rel_path or "") for h in hits)
+
+
+def test_upsert_skips_email_attachments_without_chroma_write(
+    dual_paths: tuple[Path, Path],
+) -> None:
+    """Hook post-write su un allegato Gmail: False, niente riga SQLite."""
+    data_ws, index_root = dual_paths
+    rel = f"{EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19/fattura.txt"
+    dest = data_ws / rel
+    dest.parent.mkdir(parents=True)
+    dest.write_text("non indicizzare\n", encoding="utf-8")
+
+    changed = upsert_indexed_file(data_ws, rel, index_root=index_root)
+    assert changed is False
+    # Early-return prima di IndexDB/Chroma: lo skip non deve creare files.db.
+    assert not db_path(index_root).is_file()
+
+
+def test_sync_deletes_orphan_moved_into_email_attachments(
+    dual_paths: tuple[Path, Path],
+) -> None:
+    """File già in indice, poi spostato sotto email_attachments/ → orphan delete."""
+    data_ws, index_root = dual_paths
+    note = data_ws / "promemoria.txt"
+    note.write_text("fattura da non mischiare\n", encoding="utf-8")
+    sync_workspace_index(data_ws, index_root=index_root)
+    with IndexDB(index_root) as db:
+        assert db.get_file("promemoria.txt") is not None
+
+    # Stesso contenuto, nuova sede: lo skip la toglie da on_disk → pulizia indice.
+    dest = data_ws / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19" / "promemoria.txt"
+    dest.parent.mkdir(parents=True)
+    note.rename(dest)
+    stats = sync_workspace_index(data_ws, index_root=index_root)
+    assert stats.deleted == 1
+    with IndexDB(index_root) as db:
+        assert db.get_file("promemoria.txt") is None
+        assert db.get_file(f"{EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19/promemoria.txt") is None

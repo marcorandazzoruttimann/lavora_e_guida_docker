@@ -2,7 +2,7 @@
 
 Avvio: `lavora-e-guida` oppure `python -m lavora_e_guida`.
 Agente: `--agent master|gmail` (default master = FS/RAG, invariato).
-Switch LLM: `--llm ollama|gemini` (default ollama) e `--model` opzionale.
+Switch LLM: `--llm gemini|ollama` (default gemini) e `--model` opzionale.
 Audio: `AUDIO_DRIVER=mock|http` da Settings (factory, non Mock hardcoded).
 """
 
@@ -34,11 +34,11 @@ from lavora_e_guida.tools.fs import ensure_workspace
 
 # Nomi tool nel banner: allineati allo spec, così a occhio si vede cosa parla.
 _MASTER_TOOLS_BANNER = "create_text_file,append_note,read_file,find_file"
-_GMAIL_TOOLS_BANNER = "list_emails,read_email"
+_GMAIL_TOOLS_BANNER = "list_emails,read_email,save_attachments"
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """CLI: agente, provider LLM e override modello (senza flag = master+ollama)."""
+    """CLI: agente, provider LLM e override modello (senza flag = master+gemini)."""
     parser = argparse.ArgumentParser(
         prog="lavora-e-guida",
         description=(
@@ -52,12 +52,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="master",
         help="Agente vocale: master (FS/RAG) o gmail (sola lettura). Default: master.",
     )
-    # Default ollama: stessi comandi di prima senza --llm.
+    # Default gemini: prodotto vocale; Ollama/3B resta `--llm ollama` (studio/backup).
     parser.add_argument(
         "--llm",
         choices=("ollama", "gemini"),
-        default="ollama",
-        help="Provider LLM (default: ollama).",
+        default="gemini",
+        help="Provider LLM (default: gemini).",
     )
     # None → factory usa OLLAMA_MODEL / GEMINI_MODEL da config.
     parser.add_argument(

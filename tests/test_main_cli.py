@@ -13,6 +13,7 @@ from lavora_e_guida import main as main_mod
 from lavora_e_guida.config import Settings
 from lavora_e_guida.gmail.agent import GMAIL_LOOP_SPEC
 from lavora_e_guida.gmail.oauth import MSG_GMAIL_NOT_LINKED
+from lavora_e_guida.llm.cloud import GeminiChat
 from lavora_e_guida.llm.local_ollama import LocalOllama
 from lavora_e_guida.rag.index_sync import SyncStats
 
@@ -32,12 +33,20 @@ def _stub_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
     monkeypatch.setattr(main_mod, "load_dotenv", lambda: None)
     monkeypatch.setattr(main_mod, "get_settings", lambda: settings)
 
-    def fake_build_llm(provider: str, model: str | None = None) -> LocalOllama:
-        # Client iniettato: isinstance(LocalOllama) resta vero, zero hit a Ollama.
-        return LocalOllama(
-            model=model or "fake-model",
-            client=httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(200))),
+    def fake_build_llm(
+        provider: str, model: str | None = None
+    ) -> LocalOllama | GeminiChat:
+        # Client iniettato: zero rete. Il tipo deve matchare l'assert in main().
+        client = httpx.Client(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200))
         )
+        if provider == "gemini":
+            return GeminiChat(
+                model=model or "fake-gemini",
+                api_key="fake-key",
+                client=client,
+            )
+        return LocalOllama(model=model or "fake-model", client=client)
 
     monkeypatch.setattr(main_mod, "build_llm", fake_build_llm)
     monkeypatch.setattr(main_mod, "_startup_ollama", lambda llm, model: None)
@@ -46,15 +55,22 @@ def _stub_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
 
 
 def test_parse_args_agent_default_is_master() -> None:
-    """Senza --agent il default resta master: comandi esistenti invariati."""
+    """Senza flag: master + gemini (prodotto). Ollama solo se --llm ollama."""
     args = main_mod._parse_args([])
     assert args.agent == "master"
+    assert args.llm == "gemini"
+
+
+def test_parse_args_llm_ollama_is_explicit_backup() -> None:
+    """Backup studio: --llm ollama non è più implicito."""
+    args = main_mod._parse_args(["--llm", "ollama"])
     assert args.llm == "ollama"
+    assert args.agent == "master"
 
 
-def test_parse_args_agent_gmail_and_llm_gemini() -> None:
-    """Lancio previsto dal piano: --agent gmail --llm gemini."""
-    args = main_mod._parse_args(["--agent", "gmail", "--llm", "gemini"])
+def test_parse_args_agent_gmail_defaults_to_gemini() -> None:
+    """Gmail senza --llm: stesso Gemini di prodotto, non serve ripetere il flag."""
+    args = main_mod._parse_args(["--agent", "gmail"])
     assert args.agent == "gmail"
     assert args.llm == "gemini"
 
@@ -102,7 +118,7 @@ def test_gmail_mode_skips_rag_and_uses_gmail_spec(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Token ok: skip Desktop/RAG, banner gmail, spec list_emails/read_email."""
+    """Token ok: skip Desktop/RAG, banner gmail, spec list/read/save."""
     _stub_process(monkeypatch, tmp_path)
     monkeypatch.setattr(main_mod, "get_gmail_credentials", lambda settings=None: object())
 
@@ -134,7 +150,8 @@ def test_gmail_mode_skips_rag_and_uses_gmail_spec(
     assert captured["spec"] is GMAIL_LOOP_SPEC
     err = capsys.readouterr().err
     assert "agent=gmail" in err
-    assert "tools=list_emails,read_email" in err
+    assert "provider=gemini" in err
+    assert "tools=list_emails,read_email,save_attachments" in err
     assert "find_file" not in err
     assert "RAG sync" not in err
 
@@ -179,4 +196,5 @@ def test_master_mode_still_prepares_workspace_and_default_spec(
     err = capsys.readouterr().err
     assert "agent=gmail" not in err
     assert "tools=create_text_file,append_note,read_file,find_file" in err
+    assert "provider=gemini" in err
     assert "RAG sync" in err

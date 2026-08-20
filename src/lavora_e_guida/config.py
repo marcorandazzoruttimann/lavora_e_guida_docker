@@ -21,6 +21,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Nome cartella INDEX_ROOT di default: non è più `ollama_lab` (troppo legato a un solo LLM).
 DEFAULT_INDEX_DIRNAME = "runtime"
 
+# Cartella Gmail sul Desktop (`WORKSPACE_ROOT/email_attachments/YYYY-MM-DD/`).
+# Non riusare `inbox/`: quella resta per i PDF importati a mano dal master.
+EMAIL_ATTACHMENTS_DIRNAME = "email_attachments"
+
+# Directory di primo livello sotto il workspace: rglob RAG e resolver RapidFuzz
+# le ignorano, così `find_file` non mescola fatture scaricate e note.
+INDEX_SKIP_DIRNAMES: frozenset[str] = frozenset({EMAIL_ATTACHMENTS_DIRNAME})
+
+
+def is_index_skipped_rel(rel: Path | str) -> bool:
+    """True se il path relativo al workspace sta sotto una cartella non indicizzabile.
+
+    Solo il primo segmento: `email_attachments/2026-08-19/fattura.pdf` è skip;
+    `notes/email_attachments.txt` resta visibile (è una nota, non la cartella Gmail).
+    """
+    # Path() accetta stringa posix o Path già relativo; parts[0] è la top-level dir.
+    parts = Path(rel).parts
+    return bool(parts) and parts[0] in INDEX_SKIP_DIRNAMES
+
 
 def discover_windows_host() -> str:
     """Return the WSL2 Windows host IP from `/etc/resolv.conf`, or localhost."""

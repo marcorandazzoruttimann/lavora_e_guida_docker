@@ -1,0 +1,26 @@
+---
+description: LLM di prodotto Gemini; Qwen 3B solo prova/backup. Prompt, tool e RAG si tarano su Gemini.
+alwaysApply: true
+---
+
+# LLM: Gemini di prodotto, 3B solo backup
+
+Target di architettura, prompt, tool e RAG: **Gemini**. Qwen 2.5 3B (Ollama) è prova di studio e fallback, non il motivo per spezzare agenti, accorciare i prompt o tenere gli allegati fuori dall’indice.
+
+Non progettare «perché il 3B si confonde». Se una scelta esiste solo per proteggere il 3B (due collection Chroma, skip RAG, prompt anorettici, tool spezzati), non farla. Il 3B in backup vivrà con più ambiguità: è accettabile.
+
+## Contratto JSON del loop (resta, è del runtime)
+
+Il loop emette un solo oggetto JSON per turno. Vale per Gemini e per il 3B.
+
+1. Niente placeholder `<nome>` / `{testo}` nei prompt: tipi nativi (`"string"`, `"integer"`) o esempi concreti.
+2. Chiavi omogenee per dati uguali (`name`, `content`, `query`).
+3. Un esempio vocale → JSON reale (non solo lo schema).
+4. Un solo tool per risposta; sequenze lunghe le fa Python o il turno successivo.
+5. Prompt compatto quanto basta: Gemini può avere esempi ricchi (come Gmail); non diluire senza motivo.
+
+Esempio: `Utente: "Aggiungi latte alla spesa"` → `{"tool": "append_note", "args": {"name": "spesa", "content": "latte"}}`
+
+## RAG
+
+Un mucchio sotto il workspace Desktop (`notes/`, `inbox/`, e `email_attachments/` quando si indicizza). Collection unica. Puntualità: path + più chunk all’agente, non indici separati «note vs allegati».

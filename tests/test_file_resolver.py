@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from lavora_e_guida.config import EMAIL_ATTACHMENTS_DIRNAME
 from lavora_e_guida.tools.file_resolver import (
     _clean_stt_input,
     _number_canonical_key,
@@ -255,3 +256,23 @@ def test_resolve_does_not_crash_on_extra_dirs(tmp_path: Path) -> None:
     # Uno dei due viene scelto (entrambi validi): basta che non sia None.
     assert rel is not None
     assert rel.name == "marker.txt"
+
+
+def test_resolve_skips_email_attachments_prefers_notes(tmp_path: Path) -> None:
+    """Omonimo in email_attachments/ non vince su notes/: skip come il RAG."""
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "fattura.txt").write_text("nota fattura\n", encoding="utf-8")
+    day = tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19"
+    day.mkdir(parents=True)
+    (day / "fattura.pdf").write_bytes(b"%PDF-1.4 skip-resolver")
+    rel = resolve_file_path("fattura", tmp_path)
+    assert rel == Path("notes/fattura.txt")
+
+
+def test_resolve_skips_email_attachments_when_only_attachment(tmp_path: Path) -> None:
+    """Solo un PDF scaricato da Gmail: nessuna nota → None, non il path allegato."""
+    day = tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19"
+    day.mkdir(parents=True)
+    (day / "fattura.pdf").write_bytes(b"%PDF-1.4 solo-allegato")
+    assert resolve_file_path("fattura", tmp_path) is None

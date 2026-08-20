@@ -1,7 +1,7 @@
 """Client Gmail: OAuth a tavolino e tool di sola lettura.
 
 L'agente master (FS/RAG) non deve importare questo pacchetto: i tool email
-restano nello specialista Gmail (`list_emails` / `read_email`).
+restano nello specialista Gmail (`list_emails` / `read_email` / `save_attachments`).
 """
 
 from lavora_e_guida.gmail.oauth import (
@@ -17,6 +17,7 @@ from lavora_e_guida.gmail.read import (
     MailboxSession,
     list_emails,
     read_email,
+    save_attachments,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "gmail_profile",
     "list_emails",
     "read_email",
+    "save_attachments",
 ]

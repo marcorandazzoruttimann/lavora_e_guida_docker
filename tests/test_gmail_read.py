@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -23,20 +23,29 @@ from lavora_e_guida.gmail.oauth import GMAIL_SCOPES, MSG_GMAIL_NOT_LINKED
 from lavora_e_guida.gmail.read import (
     COUNT_CAP,
     COUNT_PAGE_SIZE,
+    EMAIL_ATTACHMENTS_DIRNAME,
     GMAIL_MESSAGES_URL,
+    MAX_ATTACHMENT_BYTES,
     MAX_BODY_CHARS,
     MSG_EMPTY_LIST,
+    MSG_EMPTY_NAME,
     MSG_LIST_FIRST,
+    MSG_NO_ATTACHMENTS,
     MailboxItem,
     MailboxSession,
     clamp_list_limit,
     extract_message_text,
     format_count_result,
     get_mailbox_session,
+    iter_real_attachments,
     list_emails,
     normalize_gmail_query,
     read_email,
     reset_mailbox_session,
+    sanitize_attachment_filename,
+    save_attachments,
+    speak_list_attachment_suffix,
+    speak_read_attachment_suffix,
     strip_html_to_text,
     truncate_tts_body,
 )
@@ -99,15 +108,32 @@ def _full(
     plain: str | None = None,
     html: str | None = None,
     snippet: str | None = None,
+    extra_parts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Resource format=full: multipart/alternative se ci sono entrambi i body."""
+    """Resource format=full: multipart/alternative se ci sono entrambi i body.
+
+    `extra_parts` (PDF, immagini) vanno in multipart/mixed sopra l'alternative:
+    così i test di elenco/lettura possono iniettare allegati veri o logo inline.
+    """
     parts: list[dict[str, Any]] = []
     if plain is not None:
         parts.append({"mimeType": "text/plain", "body": {"data": _b64url(plain)}})
     if html is not None:
         parts.append({"mimeType": "text/html", "body": {"data": _b64url(html)}})
+    extras = list(extra_parts or [])
     payload: dict[str, Any] = {"headers": _headers(sender, subject)}
-    if len(parts) == 1:
+    if extras:
+        # mixed: corpo (nudo o alternative) + file; filename/size restano sui figli.
+        inner: dict[str, Any]
+        if len(parts) == 1:
+            inner = {"mimeType": parts[0]["mimeType"], "body": parts[0]["body"]}
+        elif parts:
+            inner = {"mimeType": "multipart/alternative", "parts": parts}
+        else:
+            inner = {"mimeType": "text/plain", "body": {}}
+        payload["mimeType"] = "multipart/mixed"
+        payload["parts"] = [inner, *extras]
+    elif len(parts) == 1:
         payload["mimeType"] = parts[0]["mimeType"]
         payload["body"] = parts[0]["body"]
     elif parts:
@@ -117,6 +143,29 @@ def _full(
     if snippet is not None:
         message["snippet"] = snippet
     return message
+
+
+def _mime_part(
+    mime: str,
+    filename: str,
+    *,
+    size: int = 10_000,
+    attachment_id: str = "att1",
+    disposition: str | None = None,
+    content_id: str | None = None,
+) -> dict[str, Any]:
+    """MessagePart Gmail (metadata o full): filename/size/header, niente body.data."""
+    headers: list[dict[str, str]] = []
+    if disposition is not None:
+        headers.append({"name": "Content-Disposition", "value": disposition})
+    if content_id is not None:
+        headers.append({"name": "Content-ID", "value": content_id})
+    return {
+        "mimeType": mime,
+        "filename": filename,
+        "headers": headers,
+        "body": {"attachmentId": attachment_id, "size": size},
+    }
 
 
 def _query_of(request: httpx.Request) -> dict[str, list[str]]:
@@ -172,6 +221,47 @@ def _mailbox_client(messages: dict[str, dict[str, Any]]) -> httpx.Client:
         if resource is None:
             return httpx.Response(404, json={"error": {"code": 404}})
         # Metadata vs full: per i test restituiamo sempre il resource completo.
+        return httpx.Response(200, json=resource)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _b64url_bytes(data: bytes) -> str:
+    """Stesso encoding dei binari Gmail (urlsafe, padding spesso assente)."""
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _mailbox_client_with_blobs(
+    messages: dict[str, dict[str, Any]],
+    blobs: dict[tuple[str, str], bytes],
+    captured: list[str] | None = None,
+) -> httpx.Client:
+    """GET messaggio + GET attachments/{id}; il binario è in `blobs[(msg, aid)]`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if captured is not None:
+            captured.append(path)
+        # Allegato: .../messages/{id}/attachments/{aid} — prima del dettaglio messaggio.
+        if "/attachments/" in path:
+            pieces = [part for part in path.split("/") if part]
+            att_index = pieces.index("attachments")
+            msg_id = pieces[att_index - 1]
+            att_id = pieces[att_index + 1]
+            blob = blobs.get((msg_id, att_id))
+            if blob is None:
+                return httpx.Response(404, json={"error": {"code": 404}})
+            return httpx.Response(
+                200,
+                json={"size": len(blob), "data": _b64url_bytes(blob)},
+            )
+        if path.rstrip("/").endswith("/users/me/messages"):
+            ids = [{"id": mid} for mid in messages]
+            return httpx.Response(200, json={"messages": ids})
+        msg_id = path.rsplit("/", 1)[-1]
+        resource = messages.get(msg_id)
+        if resource is None:
+            return httpx.Response(404, json={"error": {"code": 404}})
         return httpx.Response(200, json=resource)
 
     return httpx.Client(transport=httpx.MockTransport(handler))
@@ -442,6 +532,646 @@ def test_extract_nested_multipart_skips_attachments() -> None:
         },
     }
     assert extract_message_text(nested) == "Corpo plain"
+    # Il PDF è un allegato vero: l'estrazione testo lo ignora, l'euristica lo conta.
+    reals = iter_real_attachments(nested["payload"])
+    assert [item.filename for item in reals] == ["fattura.pdf"]
+
+
+def test_iter_real_attachments_pdf_counted_inline_png_excluded() -> None:
+    """PDF (anche senza disposition) è vero; image/png inline+cid è logo, non TTS."""
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": _b64url("Ciao")}},
+            _mime_part("application/pdf", "fattura.pdf", size=80_000),
+            _mime_part(
+                "image/png",
+                "logo.png",
+                size=2_000,
+                disposition="inline; filename=\"logo.png\"",
+                content_id="<logo@x.test>",
+            ),
+        ],
+    }
+    reals = iter_real_attachments(payload)
+    assert [item.filename for item in reals] == ["fattura.pdf"]
+    assert reals[0].mime_type == "application/pdf"
+    assert speak_list_attachment_suffix(len(reals)) == ", 1 allegato"
+    assert speak_read_attachment_suffix(reals) == ", 1 allegato fattura.pdf"
+
+
+def test_iter_real_attachments_decorative_names_and_small_images() -> None:
+    """image001, signature, untitled e PNG sotto 40 KiB senza attachment: ignorati."""
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            _mime_part("image/png", "image001.png", size=8_000),
+            _mime_part("image/gif", "signature.gif", size=50_000),
+            _mime_part("image/png", "untitled", size=12_000),
+            _mime_part("image/jpeg", "icona.jpg", size=10_000),
+            _mime_part(
+                "image/jpeg",
+                "vacanze.jpg",
+                size=200_000,
+                disposition="attachment; filename=\"vacanze.jpg\"",
+            ),
+        ],
+    }
+    reals = iter_real_attachments(payload)
+    assert [item.filename for item in reals] == ["vacanze.jpg"]
+    assert speak_list_attachment_suffix(2) == ", 2 allegati"
+    assert speak_list_attachment_suffix(0) == ""
+    assert speak_read_attachment_suffix([]) == ""
+
+
+def test_iter_real_attachments_non_image_without_disposition() -> None:
+    """doc/zip con filename restano veri anche se Content-Disposition manca."""
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            _mime_part("application/zip", "contratto.zip", size=500_000),
+            _mime_part(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "verbale.docx",
+                size=40_000,
+            ),
+        ],
+    }
+    names = [item.filename for item in iter_real_attachments(payload)]
+    assert names == ["contratto.zip", "verbale.docx"]
+    assert speak_read_attachment_suffix(iter_real_attachments(payload)) == (
+        ", 2 allegati contratto.zip, verbale.docx"
+    )
+
+
+def test_list_emails_speaks_real_attachment_count(tmp_path: Path) -> None:
+    """Elenco metadata: PDF → ', 1 allegato'; logo inline non aggiunge suffisso."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.rstrip("/").endswith("/users/me/messages"):
+            return httpx.Response(200, json={"messages": [{"id": "aaa"}, {"id": "bbb"}]})
+        if path.endswith("/aaa"):
+            return httpx.Response(
+                200,
+                json=_full(
+                    "aaa",
+                    "Mario Rossi <mario@x.test>",
+                    "Fattura",
+                    plain="Pagare.",
+                    extra_parts=[
+                        _mime_part("application/pdf", "fattura.pdf", size=80_000),
+                        _mime_part(
+                            "image/png",
+                            "logo.png",
+                            size=1_500,
+                            disposition="inline",
+                            content_id="<logo@x.test>",
+                        ),
+                    ],
+                ),
+            )
+        if path.endswith("/bbb"):
+            return httpx.Response(
+                200,
+                json=_full(
+                    "bbb",
+                    "Anna <anna@x.test>",
+                    "Riunione",
+                    plain="Domani.",
+                    extra_parts=[
+                        _mime_part(
+                            "image/png",
+                            "image001.png",
+                            size=2_000,
+                            disposition="inline",
+                            content_id="<img001>",
+                        ),
+                    ],
+                ),
+            )
+        return httpx.Response(404, json={})
+
+    session = MailboxSession()
+    result = list_emails(
+        "inbox",
+        session=session,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+    )
+    assert "1. Da Mario Rossi, oggetto Fattura, 1 allegato." in result
+    # Solo logo: niente suffisso, così Gemini non inventa un PDF.
+    assert "2. Da Anna, oggetto Riunione." in result
+    assert "2. Da Anna, oggetto Riunione, " not in result
+    assert session.items[0].attachment_count == 1
+    assert session.items[1].attachment_count == 0
+
+
+def test_list_emails_requests_format_metadata_not_full(tmp_path: Path) -> None:
+    """Piano: in lista format=metadata (filename/size/disposition), mai GET full."""
+    seen_detail: list[dict[str, list[str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        qs = _query_of(request)
+        if path.rstrip("/").endswith("/users/me/messages"):
+            return httpx.Response(200, json={"messages": [{"id": "aaa"}]})
+        if path.endswith("/aaa"):
+            # Solo il dettaglio messaggio: qui deve comparire format=metadata.
+            seen_detail.append(qs)
+            # Resource come metadata Gmail: parts con filename/size, niente body.data.
+            return httpx.Response(
+                200,
+                json={
+                    "id": "aaa",
+                    "payload": {
+                        "headers": _headers("Mario <mario@x.test>", "Fattura"),
+                        "mimeType": "multipart/mixed",
+                        "parts": [
+                            {"mimeType": "text/plain", "body": {"size": 12}},
+                            _mime_part("application/pdf", "fattura.pdf", size=80_000),
+                            _mime_part(
+                                "image/png",
+                                "logo.png",
+                                size=1_500,
+                                disposition="inline",
+                                content_id="<logo@x.test>",
+                            ),
+                        ],
+                    },
+                },
+            )
+        return httpx.Response(404, json={})
+
+    result = list_emails(
+        "inbox",
+        session=MailboxSession(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+    )
+    assert seen_detail, "list_emails deve GET il dettaglio per ogni id"
+    assert seen_detail[0].get("format") == ["metadata"]
+    # Nessun format=full: il body non serve per il flag allegati in elenco.
+    assert seen_detail[0].get("format") != ["full"]
+    assert "1. Da Mario, oggetto Fattura, 1 allegato." in result
+    assert "logo.png" not in result
+
+
+def test_read_email_speaks_attachment_filename(tmp_path: Path) -> None:
+    """Lettura: header con nome file vero; il logo inline non compare nel TTS."""
+    full = _full(
+        "aaa",
+        "Mario Rossi <mario@x.test>",
+        "Fattura",
+        plain="Pagare entro venerdì.",
+        extra_parts=[
+            _mime_part("application/pdf", "fattura.pdf", size=80_000),
+            _mime_part(
+                "image/png",
+                "logo.png",
+                size=1_200,
+                disposition="inline",
+                content_id="<logo@x.test>",
+            ),
+        ],
+    )
+    session = MailboxSession()
+    session.replace(
+        [MailboxItem("aaa", "Mario Rossi", "Fattura", "Mario Rossi <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    result = read_email(
+        "1",
+        session=session,
+        client=_mailbox_client({"aaa": full}),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+    )
+    assert result.startswith(
+        "OK: email da Mario Rossi, oggetto Fattura, 1 allegato fattura.pdf."
+    )
+    assert "logo.png" not in result
+    assert "Pagare entro venerdì." in result
+
+
+def test_read_email_logo_only_has_no_attachment_suffix(tmp_path: Path) -> None:
+    """Solo firma/logo: stessa formula di un'email senza file, niente 'allegato'."""
+    full = _full(
+        "aaa",
+        "Mario <mario@x.test>",
+        "Ciao",
+        plain="Solo testo.",
+        extra_parts=[
+            _mime_part(
+                "image/png",
+                "logo.png",
+                size=800,
+                disposition="inline",
+                content_id="<logo@x.test>",
+            ),
+        ],
+    )
+    session = MailboxSession()
+    session.replace(
+        [MailboxItem("aaa", "Mario", "Ciao", "Mario <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    result = read_email(
+        "1",
+        session=session,
+        client=_mailbox_client({"aaa": full}),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+    )
+    assert result.startswith("OK: email da Mario, oggetto Ciao.")
+    assert "allegato" not in result.split("\n", 1)[0]
+
+
+def test_sanitize_attachment_filename_strips_traversal_and_windows_chars() -> None:
+    """Path traversal e caratteri NTFS non devono uscire dalla cartella del giorno."""
+    assert sanitize_attachment_filename("../../Windows/system.ini") == "system.ini"
+    assert sanitize_attachment_filename("foo/../../../etc/passwd") == "passwd"
+    assert sanitize_attachment_filename("C:\\Windows\\x.pdf") == "x.pdf"
+    assert sanitize_attachment_filename("..") == "allegato"
+    assert sanitize_attachment_filename("a:b|c?.pdf") == "a_b_c_.pdf"
+    assert sanitize_attachment_filename("CON.txt").casefold().startswith("_con")
+    assert "/" not in sanitize_attachment_filename("../evil.pdf")
+    assert "\\" not in sanitize_attachment_filename("..\\evil.pdf")
+
+
+def test_save_attachments_writes_pdf_skips_inline_png(tmp_path: Path) -> None:
+    """PDF vero → disco + TTS; logo inline non si GET e non si scrive."""
+    pdf_bytes = b"%PDF-1.4 fake-invoice"
+    full = _full(
+        "aaa",
+        "Mario Rossi <mario@x.test>",
+        "Fattura",
+        plain="Pagare.",
+        extra_parts=[
+            _mime_part("application/pdf", "fattura.pdf", size=len(pdf_bytes), attachment_id="pdf1"),
+            _mime_part(
+                "image/png",
+                "logo.png",
+                size=1_200,
+                attachment_id="logo1",
+                disposition="inline",
+                content_id="<logo@x.test>",
+            ),
+        ],
+    )
+    captured: list[str] = []
+    client = _mailbox_client_with_blobs(
+        {"aaa": full},
+        {("aaa", "pdf1"): pdf_bytes, ("aaa", "logo1"): b"\x89PNG"},
+        captured,
+    )
+    session = MailboxSession()
+    session.replace(
+        [MailboxItem("aaa", "Mario Rossi", "Fattura", "Mario Rossi <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    day = date(2026, 8, 19)
+    result = save_attachments(
+        "1",
+        session=session,
+        client=client,
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+        workspace=tmp_path,
+        today=day,
+    )
+    assert result == (
+        f"OK: 1 allegato salvato in {EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19: fattura.pdf."
+    )
+    dest = tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19" / "fattura.pdf"
+    assert dest.read_bytes() == pdf_bytes
+    # Solo il PDF: il logo non deve comparire né sul disco né nel GET attachments.
+    assert not (tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19" / "logo.png").exists()
+    assert not (tmp_path / "notes").exists()
+    assert not (tmp_path / "inbox").exists()
+    assert any(path.endswith("/attachments/pdf1") for path in captured)
+    assert not any(path.endswith("/attachments/logo1") for path in captured)
+    assert "aaa" not in result
+
+
+def test_save_attachments_no_real_attachments_speaks_none(tmp_path: Path) -> None:
+    """Solo firma/logo: OK nessun allegato, zero write e zero GET binario."""
+    full = _full(
+        "aaa",
+        "Mario <mario@x.test>",
+        "Ciao",
+        plain="Solo testo.",
+        extra_parts=[
+            _mime_part(
+                "image/png",
+                "logo.png",
+                size=800,
+                attachment_id="logo1",
+                disposition="inline",
+                content_id="<logo@x.test>",
+            ),
+        ],
+    )
+    captured: list[str] = []
+    session = MailboxSession()
+    session.replace(
+        [MailboxItem("aaa", "Mario", "Ciao", "Mario <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    result = save_attachments(
+        "1",
+        session=session,
+        client=_mailbox_client_with_blobs(
+            {"aaa": full},
+            {("aaa", "logo1"): b"\x89PNG"},
+            captured,
+        ),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+        workspace=tmp_path,
+        today=date(2026, 8, 19),
+    )
+    assert result == MSG_NO_ATTACHMENTS
+    day_dir = tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19"
+    assert not day_dir.exists() or not any(day_dir.iterdir())
+    assert not any("/attachments/" in path for path in captured)
+
+
+def test_save_attachments_plain_email_speaks_none(tmp_path: Path) -> None:
+    """Email solo testo, zero extra_parts: stesso OK nessun allegato, zero write."""
+    full = _full("aaa", "Mario <mario@x.test>", "Ciao", plain="Solo testo.")
+    captured: list[str] = []
+    session = MailboxSession()
+    session.replace(
+        [MailboxItem("aaa", "Mario", "Ciao", "Mario <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    result = save_attachments(
+        "1",
+        session=session,
+        client=_mailbox_client_with_blobs({"aaa": full}, {}, captured),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+        workspace=tmp_path,
+        today=date(2026, 8, 19),
+    )
+    assert result == MSG_NO_ATTACHMENTS
+    assert not (tmp_path / EMAIL_ATTACHMENTS_DIRNAME).exists()
+    # Senza attachmentId veri non deve partire users.messages.attachments.get.
+    assert not any("/attachments/" in path for path in captured)
+
+
+def test_save_attachments_path_traversal_stays_in_day_folder(tmp_path: Path) -> None:
+    """Filename `../..` → basename sanitizzato sotto email_attachments/oggi/."""
+    blob = b"%PDF-1.4 evil"
+    full = _full(
+        "aaa",
+        "Mario <mario@x.test>",
+        "Fattura",
+        plain="Pagare.",
+        extra_parts=[
+            _mime_part(
+                "application/pdf",
+                "../../Windows/fattura.pdf",
+                size=len(blob),
+                attachment_id="pdf1",
+            ),
+        ],
+    )
+    session = MailboxSession()
+    session.replace(
+        [MailboxItem("aaa", "Mario", "Fattura", "Mario <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    day = date(2026, 8, 19)
+    result = save_attachments(
+        "1",
+        session=session,
+        client=_mailbox_client_with_blobs({"aaa": full}, {("aaa", "pdf1"): blob}),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+        workspace=tmp_path,
+        today=day,
+    )
+    day_dir = (tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19").resolve()
+    dest = day_dir / "fattura.pdf"
+    assert dest.is_file()
+    assert dest.read_bytes() == blob
+    assert dest.resolve().parent == day_dir
+    assert ".." not in result
+    assert "Windows" not in result
+    assert result == (
+        f"OK: 1 allegato salvato in {EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19: fattura.pdf."
+    )
+
+
+def test_save_attachments_requires_list_like_read() -> None:
+    """Senza elenco e lista vuota: stessi errori parlanti di read_email."""
+    blank = MailboxSession()
+    assert save_attachments("1", session=blank) == MSG_LIST_FIRST
+    empty = MailboxSession()
+    empty.replace([], query="inbox", gmail_q="in:inbox")
+    assert save_attachments("1", session=empty) == MSG_EMPTY_LIST
+
+
+def test_save_attachments_skips_oversize_without_blocking_others(tmp_path: Path) -> None:
+    """Oltre 15 MiB: skip parlante, niente GET di quel file, gli altri si salvano."""
+    small = b"%PDF-1.4 ok"
+    full = _full(
+        "aaa",
+        "Mario <mario@x.test>",
+        "Misto",
+        plain="Due file.",
+        extra_parts=[
+            _mime_part(
+                "application/pdf",
+                "fattura.pdf",
+                size=len(small),
+                attachment_id="pdf1",
+            ),
+            _mime_part(
+                "application/zip",
+                "archivio.zip",
+                size=MAX_ATTACHMENT_BYTES + 1,
+                attachment_id="zip1",
+            ),
+        ],
+    )
+    captured: list[str] = []
+    session = MailboxSession()
+    session.replace(
+        [MailboxItem("aaa", "Mario", "Misto", "Mario <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    result = save_attachments(
+        "1",
+        session=session,
+        client=_mailbox_client_with_blobs(
+            {"aaa": full},
+            {("aaa", "pdf1"): small, ("aaa", "zip1"): b"PK" * 10},
+            captured,
+        ),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+        workspace=tmp_path,
+        today=date(2026, 8, 19),
+    )
+    assert "fattura.pdf" in result
+    assert "troppo grande, saltato" in result
+    assert "archivio.zip" not in result
+    dest = tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19" / "fattura.pdf"
+    assert dest.read_bytes() == small
+    assert not (tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19" / "archivio.zip").exists()
+    assert any(path.endswith("/attachments/pdf1") for path in captured)
+    assert not any(path.endswith("/attachments/zip1") for path in captured)
+
+
+def test_save_attachments_two_files_speaks_both_names(tmp_path: Path) -> None:
+    """Due veri: formula plurale e entrambi i nomi, cartella del giorno locale."""
+    pdf_bytes = b"%PDF-1.4 a"
+    jpg_bytes = b"\xff\xd8\xff fake-jpeg"
+    full = _full(
+        "aaa",
+        "Mario <mario@x.test>",
+        "Fattura",
+        plain="Allegati.",
+        extra_parts=[
+            _mime_part(
+                "application/pdf",
+                "fattura.pdf",
+                size=len(pdf_bytes),
+                attachment_id="pdf1",
+            ),
+            _mime_part(
+                "image/jpeg",
+                "foto.jpg",
+                size=len(jpg_bytes),
+                attachment_id="jpg1",
+                disposition='attachment; filename="foto.jpg"',
+            ),
+        ],
+    )
+    session = MailboxSession()
+    session.replace(
+        [MailboxItem("aaa", "Mario", "Fattura", "Mario <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    result = save_attachments(
+        "1",
+        session=session,
+        client=_mailbox_client_with_blobs(
+            {"aaa": full},
+            {("aaa", "pdf1"): pdf_bytes, ("aaa", "jpg1"): jpg_bytes},
+        ),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+        workspace=tmp_path,
+        today=date(2026, 8, 19),
+    )
+    assert result == (
+        f"OK: 2 allegati salvati in {EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19: "
+        "fattura.pdf, foto.jpg."
+    )
+    day_dir = tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19"
+    assert (day_dir / "fattura.pdf").read_bytes() == pdf_bytes
+    assert (day_dir / "foto.jpg").read_bytes() == jpg_bytes
+
+
+def test_save_attachments_resolves_sender_like_read(tmp_path: Path) -> None:
+    """Stessa chiave name di read_email: 'Mario' sulla ultima lista, non l'id Gmail."""
+    pdf_bytes = b"%PDF-1.4 da-mario"
+    full = _full(
+        "aaa",
+        "Mario Rossi <mario@x.test>",
+        "Fattura",
+        plain="Pagare.",
+        extra_parts=[
+            _mime_part(
+                "application/pdf",
+                "fattura.pdf",
+                size=len(pdf_bytes),
+                attachment_id="pdf1",
+            ),
+        ],
+    )
+    session = MailboxSession()
+    session.replace(
+        [
+            MailboxItem("aaa", "Mario Rossi", "Fattura", "Mario Rossi <mario@x.test>"),
+            MailboxItem("bbb", "Anna", "Riunione", "Anna <anna@x.test>"),
+        ],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    result = save_attachments(
+        "Mario",
+        session=session,
+        client=_mailbox_client_with_blobs({"aaa": full}, {("aaa", "pdf1"): pdf_bytes}),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+        workspace=tmp_path,
+        today=date(2026, 8, 19),
+    )
+    assert result == (
+        f"OK: 1 allegato salvato in {EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19: fattura.pdf."
+    )
+    dest = tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19" / "fattura.pdf"
+    assert dest.read_bytes() == pdf_bytes
+    assert "aaa" not in result
+
+
+def test_save_attachments_existing_name_gets_suffix(tmp_path: Path) -> None:
+    """Omonimo già in email_attachments/oggi/ → fattura_2.pdf; il primo resta."""
+    pdf_bytes = b"%PDF-1.4 nuovo"
+    day_dir = tmp_path / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19"
+    # Cartella del giorno già usata: mkdir del tool deve essere exist_ok.
+    day_dir.mkdir(parents=True)
+    (day_dir / "fattura.pdf").write_bytes(b"%PDF-1.4 vecchio")
+    full = _full(
+        "aaa",
+        "Mario <mario@x.test>",
+        "Fattura",
+        plain="Pagare.",
+        extra_parts=[
+            _mime_part(
+                "application/pdf",
+                "fattura.pdf",
+                size=len(pdf_bytes),
+                attachment_id="pdf1",
+            ),
+        ],
+    )
+    session = MailboxSession()
+    session.replace(
+        [MailboxItem("aaa", "Mario", "Fattura", "Mario <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    result = save_attachments(
+        "1",
+        session=session,
+        client=_mailbox_client_with_blobs({"aaa": full}, {("aaa", "pdf1"): pdf_bytes}),
+        settings=_settings(tmp_path),
+        credentials=_creds(),
+        workspace=tmp_path,
+        today=date(2026, 8, 19),
+    )
+    assert result == (
+        f"OK: 1 allegato salvato in {EMAIL_ATTACHMENTS_DIRNAME}/2026-08-19: fattura_2.pdf."
+    )
+    # Il file preesistente non viene sovrascritto; il nuovo prende il suffisso _2.
+    assert (day_dir / "fattura.pdf").read_bytes() == b"%PDF-1.4 vecchio"
+    assert (day_dir / "fattura_2.pdf").read_bytes() == pdf_bytes
 
 
 def test_list_emails_unread_from_mario_query(tmp_path: Path) -> None:
@@ -682,12 +1412,87 @@ def test_list_emails_http_401_speaks_desktop_auth(tmp_path: Path) -> None:
     assert "tavolino" in result
 
 
+def test_gmail_prompt_and_schema_include_save_attachments() -> None:
+    """Prompt Gemini: tool save_attachments, stessa chiave name, esempio vocale."""
+    prompt = GMAIL_LOOP_SPEC.system_prompt
+    # Schema JSON: omogeneità name con read_email, niente placeholder <...>.
+    assert '"tool": "save_attachments", "args": {"name": "string"}}' in prompt
+    assert '"tool": "read_email", "args": {"name": "string"}}' in prompt
+    # One-shot concreto del piano: indice parlato, non id Gmail.
+    assert "Utente: scarica gli allegati della prima" in prompt
+    assert '{"tool": "save_attachments", "args": {"name": "1"}}' in prompt
+    # Mittente, stessa chiave: allineato a read_email "quella di Mario".
+    assert '{"tool": "save_attachments", "args": {"name": "Mario"}}' in prompt
+    # Mai automatico dopo la lettura (tool distinto, solo se lo chiedi).
+    assert "mai in automatico" in prompt
+    hint = GMAIL_LOOP_SPEC.schema_hint
+    assert "save_attachments" in hint
+    assert '{"tool":"save_attachments","args":{"name":"string"}}' in hint
+
+
+def test_dispatch_save_attachments_empty_name() -> None:
+    """name assente o vuoto: stesso errore parlante di read_email, niente HTTP."""
+    assert dispatch_gmail_tool("save_attachments", {}) == MSG_EMPTY_NAME
+    assert dispatch_gmail_tool("save_attachments", {"name": ""}) == MSG_EMPTY_NAME
+    assert dispatch_gmail_tool("save_attachments", {"name": "   "}) == MSG_EMPTY_NAME
+
+
 def test_dispatch_unknown_tool_is_spoken_error() -> None:
     """Whitelist Gmail: i tool FS del master non devono partire né toccare HTTP."""
     result = dispatch_gmail_tool("create_text_file", {"name": "spesa", "content": "latte"})
     assert result.startswith("ERRORE:")
     assert "list_emails" in result
     assert "read_email" in result
+    assert "save_attachments" in result
+
+
+def test_dispatch_save_attachments_writes_under_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JSON save_attachments name=1: resolve sessione + write, niente notes/inbox."""
+    monkeypatch.setattr(read_mod, "WORKSPACE_ROOT", tmp_path)
+    pdf_bytes = b"%PDF-1.4 dispatch"
+    full = _full(
+        "aaa",
+        "Mario Rossi <mario@x.test>",
+        "Fattura",
+        plain="Pagare.",
+        extra_parts=[
+            _mime_part(
+                "application/pdf",
+                "fattura.pdf",
+                size=len(pdf_bytes),
+                attachment_id="pdf1",
+            ),
+        ],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if "/attachments/" in path:
+            return httpx.Response(
+                200,
+                json={"size": len(pdf_bytes), "data": _b64url_bytes(pdf_bytes)},
+            )
+        if path.endswith("/aaa"):
+            return httpx.Response(200, json=full)
+        return httpx.Response(404, json={})
+
+    _patch_gmail_http(monkeypatch, handler)
+    get_mailbox_session().replace(
+        [MailboxItem("aaa", "Mario Rossi", "Fattura", "Mario Rossi <mario@x.test>")],
+        query="inbox",
+        gmail_q="in:inbox",
+    )
+    result = dispatch_gmail_tool("save_attachments", {"name": "1"})
+    assert result.startswith(f"OK: 1 allegato salvato in {EMAIL_ATTACHMENTS_DIRNAME}/")
+    assert "fattura.pdf" in result
+    written = list((tmp_path / EMAIL_ATTACHMENTS_DIRNAME).rglob("fattura.pdf"))
+    assert len(written) == 1
+    assert written[0].read_bytes() == pdf_bytes
+    assert not (tmp_path / "notes").exists()
+    assert not (tmp_path / "inbox").exists()
 
 
 def _assert_mocked_gmail_only(captured: list[str]) -> None:
@@ -829,4 +1634,100 @@ def test_gmail_loop_list_then_read_email(
     assert "[GMAIL] OK: 2 email in inbox." in stdout
     assert "[GMAIL] OK: email da Mario Rossi, oggetto Fattura." in stdout
     assert "Pagare entro venerdì." in stdout
+    _assert_mocked_gmail_only(captured)
+
+
+def test_gmail_loop_list_then_save_attachments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Due turni vocali: elenco poi 'scarica gli allegati della prima'. Mock, zero Google."""
+    # Dispatch non inietta workspace: il write deve finire sotto tmp_path, non il Desktop.
+    monkeypatch.setattr(read_mod, "WORKSPACE_ROOT", tmp_path)
+    pdf_bytes = b"%PDF-1.4 loop-vocale"
+    full = _full(
+        "aaa",
+        "Mario Rossi <mario@x.test>",
+        "Fattura",
+        plain="Pagare entro venerdì.",
+        extra_parts=[
+            _mime_part(
+                "application/pdf",
+                "fattura.pdf",
+                size=len(pdf_bytes),
+                attachment_id="pdf1",
+            ),
+            _mime_part(
+                "image/png",
+                "logo.png",
+                size=1_200,
+                attachment_id="logo1",
+                disposition="inline",
+                content_id="<logo@x.test>",
+            ),
+        ],
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Token iniettato da _patch_gmail_http: se manca, il loop sta usando altro path.
+        assert request.headers.get("Authorization") == f"Bearer {_ACCESS}"
+        path = request.url.path
+        # Binario: solo il PDF vero; il logo inline non deve arrivare qui.
+        if "/attachments/" in path:
+            assert path.endswith("/attachments/pdf1"), path
+            return httpx.Response(
+                200,
+                json={"size": len(pdf_bytes), "data": _b64url_bytes(pdf_bytes)},
+            )
+        if path.rstrip("/").endswith("/users/me/messages"):
+            assert _query_of(request).get("q") == ["in:inbox"]
+            return httpx.Response(200, json={"messages": [{"id": "aaa"}]})
+        if path.endswith("/aaa"):
+            return httpx.Response(200, json=full)
+        return httpx.Response(404, json={})
+
+    captured = _patch_gmail_http(monkeypatch, handler)
+    llm = _ScriptedLLM(
+        [
+            '{"tool": "list_emails", "args": {"query": "inbox"}}',
+            '{"tool": "none", "reply": "Hai una email da Mario, fattura."}',
+            '{"tool": "save_attachments", "args": {"name": "1"}}',
+            (
+                '{"tool": "none", "reply": '
+                '"Ho salvato fattura.pdf nella cartella degli allegati di oggi."}'
+            ),
+        ]
+    )
+    outfile = StringIO()
+    code = run_chat_loop(
+        MockSTT(
+            infile=StringIO("ultime email\nscarica gli allegati della prima\nesci\n"),
+            outfile=outfile,
+            prompt="",
+        ),
+        MockTTS(outfile=outfile, prefix="[TTS] "),
+        llm,
+        report_latency=False,
+        telemetry_db=tmp_path / "telemetry.db",
+        spec=GMAIL_LOOP_SPEC,
+    )
+    assert code == 0
+    spoken = outfile.getvalue()
+    # TTS: sintesi none; il path Desktop e l'id Gmail non devono uscire a voce.
+    assert "Hai una email da Mario, fattura." in spoken
+    assert "Ho salvato fattura.pdf nella cartella degli allegati di oggi." in spoken
+    assert "aaa" not in spoken
+    assert llm.calls == 4
+    stdout = capsys.readouterr().out
+    assert "[GMAIL] OK: 1 email in inbox." in stdout
+    assert f"[GMAIL] OK: 1 allegato salvato in {EMAIL_ATTACHMENTS_DIRNAME}/" in stdout
+    assert "fattura.pdf" in stdout
+    assert "logo.png" not in stdout
+    written = list((tmp_path / EMAIL_ATTACHMENTS_DIRNAME).rglob("fattura.pdf"))
+    assert len(written) == 1
+    assert written[0].read_bytes() == pdf_bytes
+    assert not list((tmp_path / EMAIL_ATTACHMENTS_DIRNAME).rglob("logo.png"))
+    assert not (tmp_path / "notes").exists()
+    assert not (tmp_path / "inbox").exists()
     _assert_mocked_gmail_only(captured)

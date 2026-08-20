@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("chromadb")
 
+from lavora_e_guida.config import EMAIL_ATTACHMENTS_DIRNAME
 from lavora_e_guida.rag.index_sync import sync_workspace_index
 from lavora_e_guida.tools.find import FindToolError, find_file
 
@@ -76,3 +77,29 @@ def test_find_file_no_index_yet(dual_paths: tuple[Path, Path]) -> None:
     (data_ws / "notes").mkdir()
     with pytest.raises(FindToolError, match="nessun file"):
         find_file("qualcosa", workspace=data_ws, index_root=index_root)
+
+
+def test_find_file_ignores_email_attachments(dual_paths: tuple[Path, Path]) -> None:
+    """Query da fattura Gmail non deve restituire il file sotto email_attachments/."""
+    data_ws, index_root = dual_paths
+    notes = data_ws / "notes"
+    notes.mkdir()
+    (notes / "spesa.txt").write_text("lista spesa latte pane uova\n", encoding="utf-8")
+    day = data_ws / EMAIL_ATTACHMENTS_DIRNAME / "2026-08-19"
+    day.mkdir(parents=True)
+    (day / "fattura.txt").write_text(
+        "fattura acme importo centoventi euro scadenza agosto\n",
+        encoding="utf-8",
+    )
+    try:
+        out = find_file(
+            "fattura acme importo centoventi",
+            workspace=data_ws,
+            index_root=index_root,
+        )
+    except FindToolError as exc:
+        # Nessun hit utile sulle note: l'allegato non deve comparire nemmeno nell'errore.
+        assert EMAIL_ATTACHMENTS_DIRNAME not in str(exc)
+        return
+    assert EMAIL_ATTACHMENTS_DIRNAME not in out
+    assert "fattura acme" not in out.lower()

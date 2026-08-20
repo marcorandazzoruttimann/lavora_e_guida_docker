@@ -9,6 +9,7 @@ import pytest
 from lavora_e_guida import config as config_mod
 from lavora_e_guida.config import (
     DEFAULT_INDEX_DIRNAME,
+    EMAIL_ATTACHMENTS_DIRNAME,
     GEMINI_MODEL,
     INDEX_ROOT,
     OLLAMA_MODEL,
@@ -18,6 +19,7 @@ from lavora_e_guida.config import (
     WORKSPACE_ROOT,
     Settings,
     get_settings,
+    is_index_skipped_rel,
 )
 
 
@@ -116,3 +118,17 @@ def test_gmail_env_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert settings.gmail_client_secret == "desktop-client-secret"
     assert settings.gmail_user == "account@gmail.com"
     assert settings.gmail_token_file == token
+
+
+def test_email_attachments_dir_is_index_skipped() -> None:
+    """Solo la top-level Gmail è skip RAG: una nota omonima resta indicizzabile."""
+    # Identificatore inglese condiviso con save_attachments (stesso nome cartella).
+    assert EMAIL_ATTACHMENTS_DIRNAME == "email_attachments"
+    # Path relativo tipico del tool: giorno civile + filename sanitizzato.
+    assert is_index_skipped_rel("email_attachments/2026-08-19/fattura.pdf")
+    assert is_index_skipped_rel(Path("email_attachments/x.txt"))
+    # Note e inbox restano nel rglob: non è uno skip globale sul token nel nome.
+    assert not is_index_skipped_rel("notes/spesa.txt")
+    assert not is_index_skipped_rel("notes/email_attachments.txt")
+    assert not is_index_skipped_rel("inbox/fattura.pdf")
+    assert not is_index_skipped_rel("")

@@ -52,14 +52,16 @@ Se WSL ha ~5 Gi RAM e `qwen2.5:3b` provoca swap pesante, usare `gemma2:2b`.
 ## Avvio
 
 ```bash
-# dalla root del repo, venv attivo
+# dalla root del repo, venv attivo (default: Gemini, serve GEMINI_API_KEY)
 lavora-e-guida
 # oppure
 python -m lavora_e_guida
 
-# Gemini (chiave da .env)
-lavora-e-guida --llm gemini
-lavora-e-guida --llm gemini --model gemini-3.5-flash
+# Backup locale Qwen/Ollama
+lavora-e-guida --llm ollama
+
+# Override modello Gemini
+lavora-e-guida --model gemini-3.5-flash
 ```
 
 Banner su stderr: `provider=… modello=… data=… index=…`. Digiti la frase dopo `Tu (mock STT)>`; la risposta compare come `[TTS] …`. Uscita: `esci` / `exit` / `quit`, Enter a vuoto, Ctrl+D.

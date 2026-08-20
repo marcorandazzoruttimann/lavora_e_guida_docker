@@ -2,7 +2,8 @@
 
 Questo modulo è lo specialista email. Importa da `lavora_e_guida.agent` solo
 `LoopSpec` (contratto del loop riusabile), mai i tool FS/RAG del master.
-Il master non importa questo file: niente `list_emails` / `read_email` sul FS.
+Il master non importa questo file: niente `list_emails` / `read_email` /
+`save_attachments` sul FS.
 """
 
 from __future__ import annotations
@@ -10,22 +11,29 @@ from __future__ import annotations
 from typing import Any
 
 from lavora_e_guida.agent import LoopSpec
-from lavora_e_guida.gmail.read import MSG_EMPTY_NAME, list_emails, read_email
+from lavora_e_guida.gmail.read import (
+    MSG_EMPTY_NAME,
+    list_emails,
+    read_email,
+    save_attachments,
+)
 
-# Nomi tool allineati al JSON del loop: query per elencare, name per leggere.
+# Nomi tool allineati al JSON del loop: query per elencare, name per leggere/salvare.
 _TOOL_LIST = "list_emails"
 _TOOL_READ = "read_email"
-_ALLOWED_TOOLS = frozenset({_TOOL_LIST, _TOOL_READ})
+_TOOL_SAVE = "save_attachments"
+_ALLOWED_TOOLS = frozenset({_TOOL_LIST, _TOOL_READ, _TOOL_SAVE})
 
 # Intro TTS: identità dello specialista, non una reply LLM (niente telemetria).
 _GMAIL_INTRO_TEXT = (
-    "Agente Gmail in sola lettura: posso elencare e leggere le email. "
-    "Di' esci per terminare."
+    "Agente Gmail in sola lettura: posso elencare, leggere le email "
+    "e salvare gli allegati. Di' esci per terminare."
 )
 
 # Prompt Gemini-first: JSON a un oggetto (contratto del loop), esempi ricchi.
 # Non è il prompt anorettico del master 3B: query libera, niente whitelist keyword.
 # count/tempo: tipi nativi e esempi concreti; niente after:epoch inventato (echo).
+# Chiave name unica per read_email e save_attachments (omogeneità JSON).
 _SYSTEM_PROMPT = (
     "Sei l'assistente vocale Gmail in sola lettura. Rispondi ESCLUSIVAMENTE "
     "con un oggetto JSON valido. "
@@ -35,6 +43,8 @@ _SYSTEM_PROMPT = (
     '  Opzionale in args: "limit" integer (default 5, massimo 20).\n'
     '  Opzionale in args: "count" true per il totale, senza limit.\n'
     '- Leggi un\'email già elencata: {"tool": "read_email", "args": {"name": "string"}}\n'
+    "- Scarica gli allegati di un'email già elencata: "
+    '{"tool": "save_attachments", "args": {"name": "string"}}\n'
     '- Risposta parlata: {"tool": "none", "reply": "string"}\n\n'
     "REGOLE TASSATIVE:\n"
     "1. Emetti UN SOLO oggetto JSON con UN SOLO tool per risposta.\n"
@@ -45,9 +55,11 @@ _SYSTEM_PROMPT = (
     "Non inventare timestamp Unix.\n"
     "4. Per leggere usa read_email e la chiave name: indice parlato "
     "(1, la seconda) oppure mittente o oggetto. Non inventare id Gmail.\n"
-    "5. Non puoi inviare, cancellare o modificare email. Solo elenco, "
-    "conteggio e lettura.\n"
-    "6. Dopo un Esito OK o ERRORE di un tool, rispondi SEMPRE con tool none "
+    "5. Per scaricare gli allegati usa save_attachments con la stessa chiave name. "
+    "Solo se l'utente lo chiede, mai in automatico dopo la lettura.\n"
+    "6. Non puoi inviare, cancellare o modificare email. Solo elenco, "
+    "conteggio, lettura e salvataggio allegati.\n"
+    "7. Dopo un Esito OK o ERRORE di un tool, rispondi SEMPRE con tool none "
     "e la sintesi in reply. Non richiamare lo stesso tool.\n\n"
     "ESEMPI:\n"
     "Utente: ultime email\n"
@@ -72,6 +84,14 @@ _SYSTEM_PROMPT = (
     'JSON: {"tool": "read_email", "args": {"name": "la seconda"}}\n'
     "Utente: leggi quella di Mario\n"
     'JSON: {"tool": "read_email", "args": {"name": "Mario"}}\n'
+    "Utente: scarica gli allegati della prima\n"
+    'JSON: {"tool": "save_attachments", "args": {"name": "1"}}\n'
+    "Utente: scarica gli allegati di quella di Mario\n"
+    'JSON: {"tool": "save_attachments", "args": {"name": "Mario"}}\n'
+    "Esito tool save_attachments: OK: 1 allegato salvato in "
+    "email_attachments/2026-08-19: fattura.pdf.\n"
+    'JSON: {"tool": "none", "reply": '
+    '"Ho salvato fattura.pdf nella cartella degli allegati di oggi."}\n'
     "Esito tool list_emails: OK: 2 email in inbox. "
     "1. Da Mario, oggetto Fattura. 2. Da Anna, oggetto Riunione.\n"
     'JSON: {"tool": "none", "reply": '
@@ -88,7 +108,8 @@ def _gmail_schema_hint() -> str:
         '{"tool":"none","reply":"string"} oppure '
         '{"tool":"list_emails","args":{"query":"string"}} '
         "(count true solo se l'utente chiede quante) oppure "
-        '{"tool":"read_email","args":{"name":"string"}}.'
+        '{"tool":"read_email","args":{"name":"string"}} oppure '
+        '{"tool":"save_attachments","args":{"name":"string"}}.'
     )
 
 
@@ -116,7 +137,7 @@ def _as_name(raw: object) -> str:
 
 
 def dispatch_gmail_tool(tool: str, args: dict[str, Any]) -> str:
-    """Esegue list_emails o read_email; ritorna OK:/ERRORE: parlante per il loop.
+    """Esegue list_emails, read_email o save_attachments; ritorna OK:/ERRORE:.
 
     Side-effect: REST Gmail e aggiornamento MailboxSession solo via gmail.read.
     Gli id messaggio restano in Python: questo dispatch non li mette nella stringa.
@@ -142,19 +163,22 @@ def dispatch_gmail_tool(tool: str, args: dict[str, Any]) -> str:
             count=args_dict.get("count"),
         )
 
-    # Whitelist già filtrata: resta solo read_email. name vuoto → errore parlante.
+    # read_email e save_attachments condividono la chiave name (indice o mittente).
     name = _as_name(args_dict.get("name"))
     if not name.strip():
         return MSG_EMPTY_NAME
+    if tool == _TOOL_SAVE:
+        return save_attachments(name)
     return read_email(name)
 
 
 def _print_gmail_tool_result(_tool: str, result: str) -> None:
     """Stdout analogo a [FS]/[RAG]: prefisso [GMAIL] sugli esiti OK.
 
-    list_emails è di solito una riga numerata; read_email ha header + corpo.
+    list_emails è di solito una riga numerata; read_email ha header + corpo;
+    save_attachments è una riga con i nomi file scritti sul Desktop.
     Gli ERRORE restano solo nel follow-up verso l'LLM, come nel master.
-    Il nome tool non cambia il prefisso: entrambi i tool Gmail usano [GMAIL].
+    Il nome tool non cambia il prefisso: i tool Gmail usano tutti [GMAIL].
     """
     if not result.startswith("OK:"):
         return

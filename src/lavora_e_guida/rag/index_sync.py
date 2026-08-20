@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lavora_e_guida.config import INDEX_ROOT
+from lavora_e_guida.config import INDEX_ROOT, is_index_skipped_rel
 from lavora_e_guida.rag.chroma_store import ChromaStore
 from lavora_e_guida.rag.chunking import chunk_id_for, split_text
 from lavora_e_guida.rag.index_db import (
@@ -51,6 +51,7 @@ def iter_indexable_files(data_workspace: Path) -> list[Path]:
 
     Ritorna path *assoluti* risolti; il caller deriva `rel_path` con relative_to.
     L'indice RAG vive nel repo (INDEX_ROOT), non sotto il data workspace.
+    Salta le top-level in INDEX_SKIP_DIRNAMES (oggi `email_attachments/`).
     """
     root = Path(data_workspace).resolve()
     if not root.is_dir():
@@ -58,13 +59,17 @@ def iter_indexable_files(data_workspace: Path) -> list[Path]:
 
     found: list[Path] = []
     # rglob ricorsivo: notes/, inbox/, eventuali sotto-cartelle utente.
+    # email_attachments/ è skip esplicito: fatture Gmail non devono entrare in Chroma.
     for abs_path in root.rglob("*"):
         if not abs_path.is_file():
             continue
         try:
-            abs_path.relative_to(root)
+            rel = abs_path.relative_to(root)
         except ValueError:
             # Symlink fuori root: non candidato sicuro.
+            continue
+        # Top-level skip (oggi: email_attachments/): non indicizzare, non è un errore.
+        if is_index_skipped_rel(rel):
             continue
         # Solo suffix ammessi (casefold: `.TXT` su FS Windows montato).
         if abs_path.suffix.lower() not in INDEXABLE_SUFFIXES:
@@ -195,7 +200,8 @@ def upsert_indexed_file(
     """Indicizza (o re-indicizza) un singolo path relativo al data workspace.
 
     Pensato per hook post-`create_text_file` / `append_note`.
-    Ritorna True se ha scritto chunk; False se hash invariato o file assente.
+    Ritorna True se ha scritto chunk; False se hash invariato, file assente,
+    o path sotto una dir skip (`email_attachments/`: non indicizzare al primo giro).
     """
     root = Path(data_workspace).resolve()
     idx = Path(index_root).resolve()
@@ -204,6 +210,9 @@ def upsert_indexed_file(
     if rel.is_absolute() or ".." in rel.parts:
         raise ValueError(f"rel_path non sicuro per indice: {rel_path!r}")
     rel_posix = rel.as_posix()
+    # Stesso skip del rglob: un hook post-write non deve indicizzare gli allegati Gmail.
+    if is_index_skipped_rel(rel_posix):
+        return False
 
     abs_path = (root / rel).resolve()
     # Fuori workspace (symlink / traversal): rifiuta.
