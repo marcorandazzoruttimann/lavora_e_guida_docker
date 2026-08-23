@@ -53,3 +53,9 @@ ollama_lab/gmail_token.json
 # Gmail OAuth: refresh token (Google lo riscrive) e JSON credenziali scaricato dalla Console
 **/gmail_token.json
 **/client_secret*.json
+
+# Riferimento CrewAI/AutoGen: non entra in src/ né nel prodotto vocale
+template_professional/
+
+# Note personali / backlog locale, non del repo
+TO_DO_LIST.txt

@@ -23,14 +23,14 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 from lavora_e_guida.config import Settings, get_settings
 
-# Scope nominati: in Console sono già tutti dichiarati; a runtime fase 1
-# chiediamo solo readonly. Stesso file token quando la lista GMAIL_SCOPES crescerà.
+# Scope nominati: in Console sono già tutti dichiarati.
+# Runtime: readonly + send. modify resta per un piano successivo.
 SCOPE_READONLY = "https://www.googleapis.com/auth/gmail.readonly"
 SCOPE_SEND = "https://www.googleapis.com/auth/gmail.send"
 SCOPE_MODIFY = "https://www.googleapis.com/auth/gmail.modify"
 
-# Fase 1: lettura mailbox. Send/modify si aggiungono qui al re-consenso incrementale.
-GMAIL_SCOPES: tuple[str, ...] = (SCOPE_READONLY,)
+# Fase scrittura: readonly + send. modify resta dichiarato in Console, non a runtime.
+GMAIL_SCOPES: tuple[str, ...] = (SCOPE_READONLY, SCOPE_SEND)
 
 # Endpoint REST (httpx, stesso stile di Gemini): niente google-api-python-client.
 GMAIL_PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
@@ -185,8 +185,8 @@ def get_gmail_credentials(
 ) -> Credentials:
     """Carica il token, rinfresca se scaduto, verifica gli scope. Mai apre il browser.
 
-    `scopes` default = GMAIL_SCOPES (readonly). Un caller futuro che chiede anche
-    send/modify su un token solo-readonly ottiene GmailAuthError (re-consenso CLI).
+    `scopes` default = GMAIL_SCOPES (readonly+send). Un token solo-readonly
+    ottiene GmailAuthError (re-consenso CLI a tavolino).
     """
     cfg = settings if settings is not None else get_settings()
     token_path = resolve_token_path(cfg)

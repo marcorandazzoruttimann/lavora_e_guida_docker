@@ -14,7 +14,6 @@ from lavora_e_guida.config import Settings
 from lavora_e_guida.gmail.agent import GMAIL_LOOP_SPEC
 from lavora_e_guida.gmail.oauth import MSG_GMAIL_NOT_LINKED
 from lavora_e_guida.llm.cloud import GeminiChat
-from lavora_e_guida.llm.local_ollama import LocalOllama
 from lavora_e_guida.rag.index_sync import SyncStats
 
 
@@ -35,21 +34,18 @@ def _stub_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Settings:
 
     def fake_build_llm(
         provider: str, model: str | None = None
-    ) -> LocalOllama | GeminiChat:
+    ) -> GeminiChat:
         # Client iniettato: zero rete. Il tipo deve matchare l'assert in main().
         client = httpx.Client(
             transport=httpx.MockTransport(lambda _r: httpx.Response(200))
         )
-        if provider == "gemini":
-            return GeminiChat(
-                model=model or "fake-gemini",
-                api_key="fake-key",
-                client=client,
-            )
-        return LocalOllama(model=model or "fake-model", client=client)
+        return GeminiChat(
+            model=model or "fake-gemini",
+            api_key="fake-key",
+            client=client,
+        )
 
     monkeypatch.setattr(main_mod, "build_llm", fake_build_llm)
-    monkeypatch.setattr(main_mod, "_startup_ollama", lambda llm, model: None)
     monkeypatch.setattr(main_mod, "_startup_gemini", lambda llm: None)
     return settings
 
@@ -62,7 +58,7 @@ def test_parse_args_agent_default_is_master() -> None:
 
 
 def test_parse_args_llm_ollama_is_explicit_backup() -> None:
-    """Backup studio: --llm ollama non è più implicito."""
+    """--llm ollama resta nel parser: il runtime poi fa fail-fast, non avvia Qwen."""
     args = main_mod._parse_args(["--llm", "ollama"])
     assert args.llm == "ollama"
     assert args.agent == "master"
@@ -151,7 +147,7 @@ def test_gmail_mode_skips_rag_and_uses_gmail_spec(
     err = capsys.readouterr().err
     assert "agent=gmail" in err
     assert "provider=gemini" in err
-    assert "tools=list_emails,read_email,save_attachments" in err
+    assert "tools=list_emails,read_email,save_attachments,draft_email,send_email" in err
     assert "find_file" not in err
     assert "RAG sync" not in err
 
@@ -198,3 +194,34 @@ def test_master_mode_still_prepares_workspace_and_default_spec(
     assert "tools=create_text_file,append_note,read_file,find_file" in err
     assert "provider=gemini" in err
     assert "RAG sync" in err
+
+
+def test_llm_ollama_fail_fast_does_not_start_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--llm ollama: messaggio parlante, niente Gemini, niente loop, niente Qwen."""
+    _stub_process(monkeypatch, tmp_path)
+
+    def _boom_llm(*_a: object, **_k: object) -> None:
+        raise AssertionError("build_llm non deve partire con --llm ollama")
+
+    def _boom_loop(*_a: object, **_k: object) -> int:
+        raise AssertionError("run_chat_loop non deve partire con --llm ollama")
+
+    monkeypatch.setattr(main_mod, "build_llm", _boom_llm)
+    monkeypatch.setattr(main_mod, "run_chat_loop", _boom_loop)
+    tts = MagicMock()
+    monkeypatch.setattr(
+        main_mod,
+        "create_audio_pair",
+        lambda _settings: (MagicMock(), tts),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.main(["--llm", "ollama"])
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert main_mod.MSG_OLLAMA_LOOP_UNSUPPORTED in err
+    tts.speak.assert_called_once_with(main_mod.MSG_OLLAMA_LOOP_UNSUPPORTED)

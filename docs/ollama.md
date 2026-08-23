@@ -1,4 +1,10 @@
-# Ollama e avvio vocale
+# Ollama (extra di studio)
+
+Il loop vocale di prodotto è **Gemini** con function calling nativo (`functionDeclarations` + `functionCall` / `parts[].text`). Qwen 2.5 3B via Ollama è extra di studio, non backup del prodotto.
+
+`--llm ollama` sul loop vocale è **fail-fast parlante**: non avvia il 3B, dice all’utente che il runtime è Gemini, ed esce. Il modulo `src/lavora_e_guida/llm/local_ollama.py` può restare per prove isolate (ping, smoke, test), non per il loop.
+
+Questa pagina resta per installare il daemon e le variabili `.env` se si sperimenta Ollama a parte.
 
 ## Dove gira il daemon
 
@@ -49,7 +55,7 @@ Gmail: consenso OAuth a tavolino (non nel loop vocale). Dettagli in [docs/gmail_
 
 Se WSL ha ~5 Gi RAM e `qwen2.5:3b` provoca swap pesante, usare `gemma2:2b`.
 
-## Avvio
+## Avvio (loop vocale = Gemini)
 
 ```bash
 # dalla root del repo, venv attivo (default: Gemini, serve GEMINI_API_KEY)
@@ -57,11 +63,11 @@ lavora-e-guida
 # oppure
 python -m lavora_e_guida
 
-# Backup locale Qwen/Ollama
-lavora-e-guida --llm ollama
-
 # Override modello Gemini
 lavora-e-guida --model gemini-3.5-flash
+
+# Extra di studio: NON avvia Qwen. Fail-fast parlante e uscita.
+lavora-e-guida --llm ollama
 ```
 
 Banner su stderr: `provider=… modello=… data=… index=…`. Digiti la frase dopo `Tu (mock STT)>`; la risposta compare come `[TTS] …`. Uscita: `esci` / `exit` / `quit`, Enter a vuoto, Ctrl+D.
@@ -72,7 +78,7 @@ Smoke non interattivo:
 printf 'Ciao, rispondi in una frase.\nesci\n' | lavora-e-guida
 ```
 
-Tool disponibili (JSON, un tool per turno): `create_text_file`, `append_note`, `read_file` (testo + PDF), `find_file` (RAG). All'avvio `ensure_workspace()` crea `notes/` e `inbox/` sotto `WORKSPACE_ROOT`.
+Tool sul loop: declaration native Gemini, un tool **eseguito** per enunciato (`create_text_file`, `append_note`, `read_file` testo + PDF, `find_file` RAG). Reply parlata = `parts[].text`, non JSON `tool=none`. All'avvio `ensure_workspace()` crea `notes/` e `inbox/` sotto `WORKSPACE_ROOT`.
 
 ## Port mirror (Host → WSL)
 

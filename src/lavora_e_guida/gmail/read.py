@@ -1,11 +1,12 @@
 """Tool Gmail in sola lettura: elenco, corpo TTS e salvataggio allegati.
 
-Gemini (o Ollama) formula JSON `list_emails` / `read_email` / `save_attachments`;
-questo modulo esegue la REST Gmail via httpx e parla all'utente. Gli id
-messaggio non sono parlabili: restano nella MailboxSession in-process (mappa
-1..N). Mai un browser: token assente o HTTP 401 → GmailAuthError già parlante.
+Gemini chiama `list_emails` / `read_email` / `save_attachments` via
+function calling; questo modulo esegue la REST Gmail via httpx e parla
+all'utente. Gli id messaggio non sono parlabili: restano nella
+MailboxSession in-process (mappa 1..N). Mai un browser: token assente o
+HTTP 401 → GmailAuthError già parlante.
 `save_attachments` scrive sotto WORKSPACE_ROOT/email_attachments/YYYY-MM-DD/,
-non in inbox/ (PDF importati a mano dal master).
+non in inbox/ (PDF importati a mano dallo specialista FS).
 """
 
 from __future__ import annotations

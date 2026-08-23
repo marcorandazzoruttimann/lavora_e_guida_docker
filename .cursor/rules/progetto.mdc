@@ -14,6 +14,7 @@ Ragionare e progettare per **Gemini** (default). Qwen 3B / Ollama è solo prova 
 ## 1. Discussioni solo in italiano
 
 - Chat, plan, spiegazioni, README/docs di progetto e messaggi TTS rivolti all’utente: **solo italiano**.
+- Testo TTS (system prompt degli specialisti, `parts[].text`, `tts.speak`): frasi parlabili, niente markdown né markup (`**`, elenchi con `-`, etichette `Da:`). Dettaglio: `llm_guidelines.mdc` e `SPOKEN_REPLY_RULE`.
 - Identificatori di codice (`snake_case`, nomi file, variabili d’ambiente, API pubbliche) restano in **inglese** dove è convenzione tecnica.
 
 ## 2. Commenti molto verbosi nel codice

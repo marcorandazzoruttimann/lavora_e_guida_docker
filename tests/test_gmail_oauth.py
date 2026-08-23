@@ -107,7 +107,7 @@ def test_installed_client_config_is_desktop_dict() -> None:
 
 
 def test_build_flow_from_settings(tmp_path: Path) -> None:
-    """Client id/secret in Settings → InstalledAppFlow Desktop, scope fase 1."""
+    """Client id/secret in Settings → InstalledAppFlow Desktop, scope runtime."""
     settings = _settings(tmp_path)
     flow = build_installed_app_flow(settings=settings)
     assert isinstance(flow, InstalledAppFlow)

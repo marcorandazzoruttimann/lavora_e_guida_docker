@@ -9,6 +9,7 @@ from typing import Any
 from lavora_e_guida.agent import run_chat_loop
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
 from lavora_e_guida.llm.errors import LLMError
+from lavora_e_guida.llm.turn import FunctionCall, LlmTurn
 from lavora_e_guida.llm.usage import (
     TokenUsage,
     parse_gemini_usage,
@@ -159,9 +160,9 @@ def test_insert_failure_does_not_raise(tmp_path: Path) -> None:
 
 
 class _ScriptedLLM:
-    """Mock SupportsChat: coda di (JSON, TokenUsage) per round consecutivi."""
+    """Mock SupportsChat: coda di (LlmTurn, TokenUsage) per round consecutivi."""
 
-    def __init__(self, script: list[tuple[str, TokenUsage]]) -> None:
+    def __init__(self, script: list[tuple[LlmTurn, TokenUsage]]) -> None:
         # Copia: pop(0) non deve mutare lo script del caller.
         self._script = list(script)
         self.last_usage = TokenUsage()
@@ -169,18 +170,17 @@ class _ScriptedLLM:
 
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
-        format_json: bool = False,
+        tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> LlmTurn:
         self.calls += 1
         if not self._script:
             raise AssertionError("chat chiamata oltre lo script del mock")
-        text, usage = self._script.pop(0)
-        # Side-effect allineato a LocalOllama/GeminiChat: last_usage poi return str.
+        turn, usage = self._script.pop(0)
         self.last_usage = usage
-        return text
+        return turn
 
     def close(self) -> None:
         return None
@@ -192,11 +192,13 @@ def test_chat_loop_records_one_row_with_summed_tokens(tmp_path: Path) -> None:
     llm = _ScriptedLLM(
         [
             (
-                '{"tool": "inventato", "args": {}}',
+                LlmTurn(
+                    function_calls=(FunctionCall(name="inventato", args={}),),
+                ),
                 TokenUsage(prompt_tokens=100, completion_tokens=20),
             ),
             (
-                '{"tool": "none", "reply": "Ho aggiunto latte alla spesa"}',
+                LlmTurn(text="Ho aggiunto latte alla spesa"),
                 TokenUsage(prompt_tokens=80, completion_tokens=15),
             ),
         ]

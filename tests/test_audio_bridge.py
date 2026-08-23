@@ -14,6 +14,7 @@ from lavora_e_guida.audio.factory import create_audio_pair, create_stt, create_t
 from lavora_e_guida.audio.http_bridge import HttpBridgeSTT, HttpBridgeTTS
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
 from lavora_e_guida.config import Settings
+from lavora_e_guida.llm.turn import FunctionCall, LlmTurn
 from lavora_e_guida.llm.usage import TokenUsage
 
 
@@ -49,8 +50,8 @@ def test_agent_loop_mock_end_to_end(tmp_path: Path) -> None:
 
         last_usage = TokenUsage()
 
-        def chat(self, *args: object, **kwargs: object) -> str:
-            return '{"tool": "none", "reply": "Ciao dal loop vocale"}'
+        def chat(self, *args: object, **kwargs: object) -> LlmTurn:
+            return LlmTurn(text="Ciao dal loop vocale")
 
         def close(self) -> None:
             return None
@@ -70,7 +71,7 @@ def test_agent_loop_mock_end_to_end(tmp_path: Path) -> None:
     assert code == 0
     spoken = outfile.getvalue()
     # Introduzione lab + reply LLM + saluto di chiusura.
-    assert "Lab Ollama FS" in spoken
+    assert "Assistente file sul Desktop" in spoken
     assert "Ciao dal loop vocale" in spoken
     assert "Arrivederci." in spoken
 
@@ -118,7 +119,6 @@ def test_agent_loop_uses_custom_spec(tmp_path: Path) -> None:
         system_prompt="Sei l'agente Gmail di test.",
         dispatch=dispatch,
         intro_text="Agente Gmail in sola lettura. Di' esci per terminare.",
-        schema_hint='{"tool":"none","reply":"string"}',
         print_tool_result=lambda tool, result: printed.append((tool, result)),
     )
 
@@ -128,12 +128,16 @@ def test_agent_loop_uses_custom_spec(tmp_path: Path) -> None:
         last_usage = TokenUsage()
         calls = 0
 
-        def chat(self, messages: list[dict[str, str]], *args: object, **kwargs: object) -> str:
+        def chat(self, messages: list[dict[str, object]], *args: object, **kwargs: object) -> LlmTurn:
             self.calls += 1
             if self.calls == 1:
                 seen_system.append(messages[0]["content"])
-                return '{"tool": "list_emails", "args": {"query": "inbox"}}'
-            return '{"tool": "none", "reply": "Hai una email da Mario."}'
+                return LlmTurn(
+                    function_calls=(
+                        FunctionCall(name="list_emails", args={"query": "inbox"}),
+                    ),
+                )
+            return LlmTurn(text="Hai una email da Mario.")
 
         def close(self) -> None:
             return None
@@ -154,6 +158,7 @@ def test_agent_loop_uses_custom_spec(tmp_path: Path) -> None:
     # Intro dello spec, non quella del master FS.
     assert "Agente Gmail in sola lettura" in spoken
     assert "Lab Ollama FS" not in spoken
+    assert "Assistente file sul Desktop" not in spoken
     assert "Hai una email da Mario." in spoken
     assert seen_system == ["Sei l'agente Gmail di test."]
     assert printed == [

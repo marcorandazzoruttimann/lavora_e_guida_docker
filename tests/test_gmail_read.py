@@ -18,7 +18,11 @@ from lavora_e_guida.agent import run_chat_loop
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
 from lavora_e_guida.config import Settings
 from lavora_e_guida.gmail import read as read_mod
-from lavora_e_guida.gmail.agent import GMAIL_LOOP_SPEC, dispatch_gmail_tool
+from lavora_e_guida.gmail.agent import (
+    GMAIL_LOOP_SPEC,
+    GMAIL_TOOL_DECLARATIONS,
+    dispatch_gmail_tool,
+)
 from lavora_e_guida.gmail.oauth import GMAIL_SCOPES, MSG_GMAIL_NOT_LINKED
 from lavora_e_guida.gmail.read import (
     COUNT_CAP,
@@ -49,6 +53,7 @@ from lavora_e_guida.gmail.read import (
     strip_html_to_text,
     truncate_tts_body,
 )
+from lavora_e_guida.llm.turn import FunctionCall, LlmTurn
 from lavora_e_guida.llm.usage import TokenUsage
 
 _USER = "tester@gmail.com"
@@ -1412,22 +1417,26 @@ def test_list_emails_http_401_speaks_desktop_auth(tmp_path: Path) -> None:
     assert "tavolino" in result
 
 
-def test_gmail_prompt_and_schema_include_save_attachments() -> None:
-    """Prompt Gemini: tool save_attachments, stessa chiave name, esempio vocale."""
+def test_gmail_prompt_and_catalog_include_save_attachments() -> None:
+    """Prompt + declaration Gemini: save_attachments, stessa chiave name, nessun JSON-in-testo."""
     prompt = GMAIL_LOOP_SPEC.system_prompt
-    # Schema JSON: omogeneità name con read_email, niente placeholder <...>.
-    assert '"tool": "save_attachments", "args": {"name": "string"}}' in prompt
-    assert '"tool": "read_email", "args": {"name": "string"}}' in prompt
-    # One-shot concreto del piano: indice parlato, non id Gmail.
-    assert "Utente: scarica gli allegati della prima" in prompt
-    assert '{"tool": "save_attachments", "args": {"name": "1"}}' in prompt
-    # Mittente, stessa chiave: allineato a read_email "quella di Mario".
-    assert '{"tool": "save_attachments", "args": {"name": "Mario"}}' in prompt
-    # Mai automatico dopo la lettura (tool distinto, solo se lo chiedi).
+    by_name = {item.name: item for item in GMAIL_TOOL_DECLARATIONS}
+    assert "save_attachments" in by_name
+    assert "read_email" in by_name
+    assert "draft_email" in by_name
+    # Omogeneità name con read_email, niente placeholder <...>.
+    save_props = by_name["save_attachments"].parameters["properties"]
+    read_props = by_name["read_email"].parameters["properties"]
+    assert "name" in save_props
+    assert "name" in read_props
+    assert "<" not in save_props["name"]["description"]
+    assert "scarica gli allegati della prima" in prompt
     assert "mai in automatico" in prompt
-    hint = GMAIL_LOOP_SPEC.schema_hint
-    assert "save_attachments" in hint
-    assert '{"tool":"save_attachments","args":{"name":"string"}}' in hint
+    # Contratto nativo: gli schemi non stanno più come JSON {"tool":...} nel prompt.
+    assert '{"tool": "save_attachments"' not in prompt
+    assert GMAIL_LOOP_SPEC.gemini_tools is not None
+    decls = GMAIL_LOOP_SPEC.gemini_tools[0]["functionDeclarations"]
+    assert any(item["name"] == "save_attachments" for item in decls)
 
 
 def test_dispatch_save_attachments_empty_name() -> None:
@@ -1444,6 +1453,7 @@ def test_dispatch_unknown_tool_is_spoken_error() -> None:
     assert "list_emails" in result
     assert "read_email" in result
     assert "save_attachments" in result
+    assert "draft_email" in result
 
 
 def test_dispatch_save_attachments_writes_under_workspace(
@@ -1531,14 +1541,19 @@ def _inbox_two_messages_handler(request: httpx.Request) -> httpx.Response:
 
 
 class _ScriptedLLM:
-    """LLM fake: coda di JSON, zero rete. Come test_audio_bridge, ma per Gmail."""
+    """LLM fake: coda di LlmTurn, zero rete. Come test_audio_bridge, ma per Gmail."""
 
-    def __init__(self, replies: list[str]) -> None:
+    def __init__(self, replies: list[LlmTurn]) -> None:
         self.last_usage = TokenUsage()
         self._replies = list(replies)
         self.calls = 0
 
-    def chat(self, messages: list[dict[str, str]], *args: object, **kwargs: object) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *args: object,
+        **kwargs: object,
+    ) -> LlmTurn:
         self.calls += 1
         # Primo round: lo spec Gmail, non il master FS, deve stare in testa.
         if self.calls == 1:
@@ -1563,11 +1578,12 @@ def test_gmail_loop_list_emails_then_none(
     captured = _patch_gmail_http(monkeypatch, _inbox_two_messages_handler)
     llm = _ScriptedLLM(
         [
-            '{"tool": "list_emails", "args": {"query": "inbox"}}',
-            (
-                '{"tool": "none", "reply": '
-                '"Hai due email: da Mario, fattura, e da Anna, riunione."}'
+            LlmTurn(
+                function_calls=(
+                    FunctionCall(name="list_emails", args={"query": "inbox"}),
+                ),
             ),
+            LlmTurn(text="Hai due email: da Mario, fattura, e da Anna, riunione."),
         ]
     )
     outfile = StringIO()
@@ -1582,8 +1598,8 @@ def test_gmail_loop_list_emails_then_none(
     assert code == 0
     spoken = outfile.getvalue()
     # Intro specialista + sintesi none; il master FS non deve comparire.
-    assert "Agente Gmail in sola lettura" in spoken
-    assert "Lab Ollama FS" not in spoken
+    assert "Agente Gmail: posso elencare" in spoken
+    assert "Assistente file sul Desktop" not in spoken
     assert "Hai due email: da Mario, fattura, e da Anna, riunione." in spoken
     assert "aaa" not in spoken
     assert llm.calls == 2
@@ -1604,10 +1620,18 @@ def test_gmail_loop_list_then_read_email(
     captured = _patch_gmail_http(monkeypatch, _inbox_two_messages_handler)
     llm = _ScriptedLLM(
         [
-            '{"tool": "list_emails", "args": {"query": "inbox"}}',
-            '{"tool": "none", "reply": "Hai due email in inbox."}',
-            '{"tool": "read_email", "args": {"name": "la prima"}}',
-            '{"tool": "none", "reply": "Mario chiede di pagare entro venerdì."}',
+            LlmTurn(
+                function_calls=(
+                    FunctionCall(name="list_emails", args={"query": "inbox"}),
+                ),
+            ),
+            LlmTurn(text="Hai due email in inbox."),
+            LlmTurn(
+                function_calls=(
+                    FunctionCall(name="read_email", args={"name": "la prima"}),
+                ),
+            ),
+            LlmTurn(text="Mario chiede di pagare entro venerdì."),
         ]
     )
     outfile = StringIO()
@@ -1690,12 +1714,19 @@ def test_gmail_loop_list_then_save_attachments(
     captured = _patch_gmail_http(monkeypatch, handler)
     llm = _ScriptedLLM(
         [
-            '{"tool": "list_emails", "args": {"query": "inbox"}}',
-            '{"tool": "none", "reply": "Hai una email da Mario, fattura."}',
-            '{"tool": "save_attachments", "args": {"name": "1"}}',
-            (
-                '{"tool": "none", "reply": '
-                '"Ho salvato fattura.pdf nella cartella degli allegati di oggi."}'
+            LlmTurn(
+                function_calls=(
+                    FunctionCall(name="list_emails", args={"query": "inbox"}),
+                ),
+            ),
+            LlmTurn(text="Hai una email da Mario, fattura."),
+            LlmTurn(
+                function_calls=(
+                    FunctionCall(name="save_attachments", args={"name": "1"}),
+                ),
+            ),
+            LlmTurn(
+                text="Ho salvato fattura.pdf nella cartella degli allegati di oggi.",
             ),
         ]
     )

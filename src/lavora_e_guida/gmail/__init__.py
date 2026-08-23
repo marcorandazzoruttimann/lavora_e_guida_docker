@@ -1,7 +1,7 @@
-"""Client Gmail: OAuth a tavolino e tool di sola lettura.
+"""Client Gmail: OAuth a tavolino, lettura e invio con HITL.
 
 L'agente master (FS/RAG) non deve importare questo pacchetto: i tool email
-restano nello specialista Gmail (`list_emails` / `read_email` / `save_attachments`).
+restano nello specialista Gmail.
 """
 
 from lavora_e_guida.gmail.oauth import (
@@ -19,6 +19,7 @@ from lavora_e_guida.gmail.read import (
     read_email,
     save_attachments,
 )
+from lavora_e_guida.gmail.send import draft_email, send_email
 
 __all__ = [
     "GMAIL_SCOPES",
@@ -27,9 +28,11 @@ __all__ = [
     "SCOPE_SEND",
     "GmailAuthError",
     "MailboxSession",
+    "draft_email",
     "get_gmail_credentials",
     "gmail_profile",
     "list_emails",
     "read_email",
     "save_attachments",
+    "send_email",
 ]
