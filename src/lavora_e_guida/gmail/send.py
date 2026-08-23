@@ -95,6 +95,23 @@ def reset_draft_session() -> None:
     _DRAFT_SESSION.clear()
 
 
+def spoken_draft_confirm(*, to: str, subject: str, body: str) -> str:
+    """Frase TTS di conferma HITL: destinatario, oggetto, corpo, poi sì/no.
+
+    Un solo testo per `draft_email` (con prefisso `OK:`) e per il retry se
+    l'utente non dice sì/no: così la seconda richiesta ha ancora il corpo.
+    Niente etichette `Oggetto:` né markdown: edge-tts legge questa stringa
+    (regola `SPOKEN_REPLY_RULE`). Side-effect: nessuno.
+    """
+    # «oggetto {subject}» è una pausa in frase, non l'etichetta da elenco.
+    # Il corpo va dopo «Il testo è:» così l'utente sente cosa sta per partire.
+    return (
+        f"ho preparato un'email a {to}, oggetto {subject}. "
+        f"Il testo è: {body}. "
+        "Di' sì per inviare o no per annullare."
+    )
+
+
 def _as_text(raw: object) -> str:
     """Normalizza un argomento Gemini a stringa strippata; None/bool → vuoto."""
     # bool è int: True non deve diventare "True" come destinatario.
@@ -177,11 +194,8 @@ def draft_email(
         return MSG_EMPTY_BODY
     store = session if session is not None else get_draft_session()
     store.set_draft(dest, subj, text)
-    # OK: il loop HITL usa questo testo (o lo prefixa) per chiedere conferma.
-    return (
-        f"OK: ho preparato un'email a {dest}, oggetto {subj}. "
-        "Di' sì per inviare o no per annullare."
-    )
+    # OK: il loop HITL toglie il prefisso e parla la stessa frase del retry.
+    return "OK: " + spoken_draft_confirm(to=dest, subject=subj, body=text)
 
 
 def send_email(

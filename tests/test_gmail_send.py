@@ -96,6 +96,8 @@ def test_draft_email_stores_session_without_http() -> None:
     assert result.startswith("OK:")
     assert "mario@x.test" in result
     assert "Fattura" in result
+    # Il parlato HITL deve includere il corpo, non solo destinatario e oggetto.
+    assert "Pagare venerdì." in result
     session = get_draft_session()
     assert session.draft is not None
     assert session.draft.to == "mario@x.test"
@@ -228,6 +230,8 @@ def test_hitl_yes_sends_after_draft(
     spoken = outfile.getvalue()
     assert "mario@x.test" in spoken
     assert "sì per inviare" in spoken
+    # Stesso corpo della bozza: l'utente sente il testo prima di confermare.
+    assert "Pagare." in spoken
     assert "email inviata a mario@x.test" in spoken
     # Il sì non deve chiedere un secondo round Gemini.
     assert llm.calls == 1

@@ -23,6 +23,7 @@ from lavora_e_guida.gmail.send import (
     draft_email,
     get_draft_session,
     send_email,
+    spoken_draft_confirm,
 )
 from lavora_e_guida.llm.spoken import SPOKEN_REPLY_RULE
 from lavora_e_guida.tools.catalog import (
@@ -242,7 +243,8 @@ def gmail_hitl_after_tool(tool: str, result: str) -> str | None:
 def gmail_hitl_on_utterance(text: str) -> str | None:
     """Se c'è una bozza in attesa: sì → send, no → annulla, altro → ripeti.
 
-    None = nessuna HITL in corso, il loop passa l'enunciato a Gemini.
+    Il retry riusa `spoken_draft_confirm` sulla bozza in sessione (to, oggetto,
+    corpo), non solo «sì o no». None = nessuna HITL, il loop passa a Gemini.
     """
     session = get_draft_session()
     if not session.awaiting_confirm:
@@ -258,7 +260,12 @@ def gmail_hitl_on_utterance(text: str) -> str | None:
     if key in _HITL_NO:
         session.clear()
         return "Invio annullato."
-    return "Di' sì per inviare o no per annullare."
+    # Né sì né no: stessa frase della bozza, col corpo, non solo il sì/no.
+    draft = session.draft
+    if draft is None:
+        # awaiting_confirm senza bozza non dovrebbe accadere; fallback parlante.
+        return "Di' sì per inviare o no per annullare."
+    return spoken_draft_confirm(to=draft.to, subject=draft.subject, body=draft.body)
 
 
 GMAIL_AGENT_SPEC = AgentSpec(
