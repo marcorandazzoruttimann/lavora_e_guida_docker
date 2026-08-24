@@ -40,7 +40,9 @@ from lavora_e_guida.gmail.read import (
     clamp_list_limit,
     extract_message_text,
     format_count_result,
+    format_list_result,
     get_mailbox_session,
+    item_from_message,
     iter_real_attachments,
     list_emails,
     normalize_gmail_query,
@@ -318,6 +320,58 @@ def test_clamp_list_limit_default_and_cap() -> None:
     assert clamp_list_limit(0) == 1
 
 
+def test_item_from_message_keeps_thread_id_and_rfc_headers() -> None:
+    """Sessione: threadId, From, Reply-To e Message-ID restano sull'item, mai nel TTS."""
+    message = {
+        "id": "aaa",
+        "threadId": "thread-xyz",
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "Mario Rossi <mario.rossi@x.test>"},
+                {"name": "Subject", "value": "Fattura"},
+                {"name": "Reply-To", "value": "Mario Rossi <reply@x.test>"},
+                {"name": "Message-ID", "value": "<msg-1@x.test>"},
+                {"name": "References", "value": "<prev@x.test>"},
+            ]
+        },
+    }
+    item = item_from_message(message)
+    assert item is not None
+    assert item.gmail_id == "aaa"
+    assert item.sender == "Mario Rossi"
+    assert item.subject == "Fattura"
+    assert item.thread_id == "thread-xyz"
+    assert item.from_address == "mario.rossi@x.test"
+    assert item.reply_to_address == "reply@x.test"
+    assert item.rfc_message_id == "<msg-1@x.test>"
+    assert item.rfc_references == "<prev@x.test>"
+    # Lista parlata: display name e oggetto, niente @ né id di thread.
+    spoken = format_list_result([item], "in:inbox")
+    assert "1. Da Mario Rossi, oggetto Fattura." in spoken
+    assert "@" not in spoken
+    assert "thread-xyz" not in spoken
+    assert "msg-1" not in spoken
+
+
+def test_item_from_message_without_reply_to_or_thread() -> None:
+    """Header opzionali assenti: indirizzo dal From, gli altri campi restano vuoti."""
+    item = item_from_message(
+        {
+            "id": "aaa",
+            "payload": {"headers": _headers("Mario <mario@x.test>", "Ciao")},
+        }
+    )
+    assert item is not None
+    assert item.thread_id == ""
+    assert item.from_address == "mario@x.test"
+    assert item.reply_to_address == ""
+    assert item.rfc_message_id == ""
+    assert item.rfc_references == ""
+    spoken = format_list_result([item], "in:inbox")
+    assert "Da Mario, oggetto Ciao." in spoken
+    assert "@" not in spoken
+
+
 def test_list_emails_inbox_uses_in_inbox_query(tmp_path: Path) -> None:
     """Elenco inbox: q=in:inbox, esito numerato, sessione 1..N senza id parlati."""
     captured: list[str] = []
@@ -347,6 +401,8 @@ def test_list_emails_inbox_uses_in_inbox_query(tmp_path: Path) -> None:
     assert result.startswith("OK: 2 email in inbox.")
     assert "1. Da Mario Rossi, oggetto Fattura." in result
     assert "2. Da Anna, oggetto Riunione." in result
+    # Lista TTS: display name, mai l'@ del From (resta in sessione per draft/reply).
+    assert "@" not in result
     assert "aaa" not in result
     assert session.listed
     assert [item.gmail_id for item in session.items] == ["aaa", "bbb"]
@@ -690,8 +746,13 @@ def test_list_emails_requests_format_metadata_not_full(tmp_path: Path) -> None:
                 200,
                 json={
                     "id": "aaa",
+                    "threadId": "thread-aaa",
                     "payload": {
-                        "headers": _headers("Mario <mario@x.test>", "Fattura"),
+                        "headers": [
+                            *_headers("Mario <mario@x.test>", "Fattura"),
+                            {"name": "Reply-To", "value": "Mario <reply@x.test>"},
+                            {"name": "Message-ID", "value": "<aaa@x.test>"},
+                        ],
                         "mimeType": "multipart/mixed",
                         "parts": [
                             {"mimeType": "text/plain", "body": {"size": 12}},
@@ -709,9 +770,10 @@ def test_list_emails_requests_format_metadata_not_full(tmp_path: Path) -> None:
             )
         return httpx.Response(404, json={})
 
+    session = MailboxSession()
     result = list_emails(
         "inbox",
-        session=MailboxSession(),
+        session=session,
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         settings=_settings(tmp_path),
         credentials=_creds(),
@@ -720,8 +782,21 @@ def test_list_emails_requests_format_metadata_not_full(tmp_path: Path) -> None:
     assert seen_detail[0].get("format") == ["metadata"]
     # Nessun format=full: il body non serve per il flag allegati in elenco.
     assert seen_detail[0].get("format") != ["full"]
+    # From/Subject già c'erano; Message-ID e Reply-To servono al reply in sessione.
+    meta_headers = seen_detail[0].get("metadataHeaders") or []
+    assert "From" in meta_headers
+    assert "Subject" in meta_headers
+    assert "Message-ID" in meta_headers
+    assert "Reply-To" in meta_headers
+    assert "References" in meta_headers
     assert "1. Da Mario, oggetto Fattura, 1 allegato." in result
     assert "logo.png" not in result
+    # TTS lista invariato: l'@ resta in sessione, non nelle frasi.
+    assert "@" not in result
+    assert session.items[0].thread_id == "thread-aaa"
+    assert session.items[0].from_address == "mario@x.test"
+    assert session.items[0].reply_to_address == "reply@x.test"
+    assert session.items[0].rfc_message_id == "<aaa@x.test>"
 
 
 def test_read_email_speaks_attachment_filename(tmp_path: Path) -> None:
@@ -1424,6 +1499,7 @@ def test_gmail_prompt_and_catalog_include_save_attachments() -> None:
     assert "save_attachments" in by_name
     assert "read_email" in by_name
     assert "draft_email" in by_name
+    assert "reply_email" in by_name
     # Omogeneità name con read_email, niente placeholder <...>.
     save_props = by_name["save_attachments"].parameters["properties"]
     read_props = by_name["read_email"].parameters["properties"]
@@ -1454,6 +1530,7 @@ def test_dispatch_unknown_tool_is_spoken_error() -> None:
     assert "read_email" in result
     assert "save_attachments" in result
     assert "draft_email" in result
+    assert "reply_email" in result
 
 
 def test_dispatch_save_attachments_writes_under_workspace(

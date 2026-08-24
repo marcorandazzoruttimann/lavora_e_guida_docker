@@ -234,7 +234,12 @@ class RealAttachment:
 
 @dataclass
 class MailboxItem:
-    """Una riga della lista vocale: id solo per la GET successiva, mai in reply."""
+    """Una riga della lista vocale: id solo per la GET successiva, mai in reply.
+
+    I campi thread/indirizzo (thread_id, from_address, Reply-To, Message-ID)
+    restano in sessione per draft/reply Python: lista e lettura TTS continuano
+    a dire solo mittente e oggetto, senza spellingare l'@ in auto.
+    """
 
     gmail_id: str
     sender: str
@@ -243,6 +248,16 @@ class MailboxItem:
     from_header: str = ""
     # Quanti allegati veri (stessa euristica di read/save); 0 = niente suffisso TTS.
     attachment_count: int = 0
+    # threadId Gmail (JSON top-level, non un header): il POST send in-reply lo rimpiazza.
+    thread_id: str = ""
+    # Solo l'@ del From, via parseaddr: destinatario se manca Reply-To.
+    from_address: str = ""
+    # Reply-To se l'header c'è; vuoto → il reply userà from_address.
+    reply_to_address: str = ""
+    # Message-ID RFC per In-Reply-To; angle brackets, mai parlato.
+    rfc_message_id: str = ""
+    # References grezzo: il send lo concatena col Message-ID; vuoto se assente.
+    rfc_references: str = ""
 
 
 @dataclass
@@ -435,6 +450,26 @@ def _speaker_from_header(from_header: str) -> str:
     return "mittente sconosciuto"
 
 
+def _address_from_header(header: str) -> str:
+    """Indirizzo SMTP da From o Reply-To: stesso parseaddr del parlato, senza display.
+
+    Serve a draft/reply in sessione: Gemini passa cognome o indice, Python tiene
+    l'@ già risolto. Header vuoto o senza parte address con '@' → stringa vuota
+    (errore parlante più a valle, niente dominio inventato).
+    """
+    # Niente parseaddr su header assente: il chiamante tratta '' come “non parsabile”.
+    decoded = _decode_rfc2047(header)
+    if not decoded:
+        return ""
+    # Stesso decode RFC2047 + parseaddr di `_speaker_from_header`, ma qui serve l'@.
+    _display, address = parseaddr(decoded)
+    email = (address or "").strip()
+    # Senza '@' non è un destinatario SMTP (display name nudo, token vocale, spazzatura).
+    if "@" not in email:
+        return ""
+    return email
+
+
 def _subject_from_header(subject_header: str) -> str:
     """Oggetto parlante; vuoto → formula fissa, niente stringa MIME cruda."""
     decoded = _decode_rfc2047(subject_header)
@@ -442,7 +477,7 @@ def _subject_from_header(subject_header: str) -> str:
 
 
 def _header_map(payload: dict[str, Any]) -> dict[str, str]:
-    """Ultima occorrenza per nome header (From/Subject), case-insensitive."""
+    """Ultima occorrenza per nome header (From/Subject/Reply-To/Message-ID), case-insensitive."""
     found: dict[str, str] = {}
     headers = payload.get("headers")
     if not isinstance(headers, list):
@@ -841,7 +876,12 @@ def truncate_tts_body(text: str, max_chars: int = MAX_BODY_CHARS) -> tuple[str, 
 
 
 def item_from_message(message: dict[str, Any]) -> MailboxItem | None:
-    """Costruisce una riga di sessione da un resource Gmail (metadata o full)."""
+    """Costruisce una riga di sessione da un resource Gmail (metadata o full).
+
+    Mittente e oggetto restano i soli campi parlati. threadId (JSON top-level)
+    e gli header From/Reply-To/Message-ID/References restano in sessione per
+    far risolvere l'indirizzo e il thread a Python, non a Gemini.
+    """
     gmail_id = message.get("id")
     if not isinstance(gmail_id, str) or not gmail_id.strip():
         return None
@@ -850,6 +890,13 @@ def item_from_message(message: dict[str, Any]) -> MailboxItem | None:
     headers = _header_map(payload_dict) if payload_dict else {}
     from_raw = headers.get("from", "")
     subject_raw = headers.get("subject", "")
+    # Chiavi casefold di `_header_map`: in lista arrivano solo se chiesti in metadataHeaders.
+    reply_to_raw = headers.get("reply-to", "")
+    message_id_raw = headers.get("message-id", "")
+    references_raw = headers.get("references", "")
+    # threadId non è un header RFC: Gmail lo mette sul resource anche in format=metadata.
+    thread_raw = message.get("threadId")
+    thread_id = thread_raw.strip() if isinstance(thread_raw, str) else ""
     # Stessa euristica della lettura: in lista basta metadata (filename/size).
     attachment_count = len(iter_real_attachments(payload_dict))
     return MailboxItem(
@@ -858,6 +905,11 @@ def item_from_message(message: dict[str, Any]) -> MailboxItem | None:
         subject=_subject_from_header(subject_raw),
         from_header=from_raw,
         attachment_count=attachment_count,
+        thread_id=thread_id,
+        from_address=_address_from_header(from_raw),
+        reply_to_address=_address_from_header(reply_to_raw),
+        rfc_message_id=message_id_raw.strip(),
+        rfc_references=references_raw.strip(),
     )
 
 
@@ -1130,8 +1182,9 @@ def list_emails(
             # Inbox vuota: Gmail omette `messages`; non è un errore, è lista vuota.
             ids = _message_ids_from_listing(listing)
             items: list[MailboxItem] = []
-            # N+1: id dalla list; From/Subject e flag allegati dal dettaglio metadata
-            # (filename/size/disposition, niente body). Non serve format=full per riga.
+            # N+1: id dalla list; From/Subject/Reply-To/Message-ID e flag allegati
+            # dal dettaglio metadata (filename/size/disposition, niente body).
+            # threadId arriva nel JSON del messaggio, non come metadataHeader.
             for gmail_id in ids[:max_results]:
                 detail = _gmail_get_json(
                     http,
@@ -1141,6 +1194,9 @@ def list_emails(
                         ("format", "metadata"),
                         ("metadataHeaders", "From"),
                         ("metadataHeaders", "Subject"),
+                        ("metadataHeaders", "Message-ID"),
+                        ("metadataHeaders", "Reply-To"),
+                        ("metadataHeaders", "References"),
                     ],
                 )
                 item = item_from_message(detail)

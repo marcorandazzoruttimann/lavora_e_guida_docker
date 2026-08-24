@@ -1,11 +1,11 @@
-"""Spec vocale Gmail: lettura, allegati, bozza e invio con HITL.
+"""Spec vocale Gmail: lettura, allegati, bozza, reply al thread e invio HITL.
 
 Questo modulo è lo specialista email. Importa da `lavora_e_guida.agent` solo
 `LoopSpec` / `AgentSpec` (contratto del loop), mai i tool FS/RAG del master.
-Il master non importa questo file: niente list/read/save/draft/send sul FS.
+Il master non importa questo file: niente list/read/save/draft/reply/send sul FS.
 
-I tool sono `functionDeclarations` Gemini. L'invio passa da `draft_email` e
-da un sì vocale in Python: Gemini non può saltare la conferma.
+I tool sono `functionDeclarations` Gemini. L'invio passa da `draft_email` o
+`reply_email` e da un sì vocale in Python: Gemini non può saltare la conferma.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from lavora_e_guida.gmail.read import (
 from lavora_e_guida.gmail.send import (
     draft_email,
     get_draft_session,
+    reply_email,
     send_email,
     spoken_draft_confirm,
 )
@@ -39,7 +40,11 @@ _TOOL_LIST = "list_emails"
 _TOOL_READ = "read_email"
 _TOOL_SAVE = "save_attachments"
 _TOOL_DRAFT = "draft_email"
+_TOOL_REPLY = "reply_email"
 _TOOL_SEND = "send_email"
+
+# draft e reply condividono lo stesso interceptor sì/no del loop.
+_HITL_DRAFT_TOOLS = frozenset({_TOOL_DRAFT, _TOOL_REPLY})
 
 # Catalogo Gmail isolato: il master FS non importa questo modulo.
 GMAIL_TOOL_DECLARATIONS: tuple[ToolDeclaration, ...] = (
@@ -92,16 +97,45 @@ GMAIL_TOOL_DECLARATIONS: tuple[ToolDeclaration, ...] = (
     ToolDeclaration(
         name=_TOOL_DRAFT,
         description=(
-            "Prepara una bozza di email (destinatario, oggetto, corpo). "
-            "Non invia. Dopo la bozza l'utente deve dire sì o no a voce."
+            "Prepara una bozza nuova, non una risposta al thread. "
+            "In to passa cognome, nome e cognome, o indice della mail già "
+            "elencata. Non inventare @ o domini: l'indirizzo lo riempie Python "
+            "da From o Reply-To. Non invia. Dopo la bozza l'utente dice sì o no. "
+            "Non spellingare l'indirizzo nella reply parlata."
         ),
         parameters=object_schema(
             {
-                "to": string_param("Indirizzo email del destinatario."),
+                # Esempi concreti (Rossi), niente placeholder <nome>: Python
+                # risolve l'@ dalla riga in sessione, Gemini non lo completa.
+                "to": string_param(
+                    "Cognome come Rossi, nome e cognome come Mario Rossi, "
+                    "o indice della mail già elencata. Non inventare un @."
+                ),
                 "subject": string_param("Oggetto del messaggio."),
                 "body": string_param("Testo del messaggio in italiano."),
             },
             required=("to", "subject", "body"),
+        ),
+    ),
+    ToolDeclaration(
+        name=_TOOL_REPLY,
+        description=(
+            "Risponde al mittente di un'email già elencata. "
+            "In name passa cognome, nome e cognome, o indice, come read_email. "
+            "Non inventare @, oggetto o threadId: li riempie Python da "
+            "From o Reply-To. Non invia. Dopo la bozza l'utente dice sì o no. "
+            "Non spellingare l'indirizzo nella reply parlata."
+        ),
+        parameters=object_schema(
+            {
+                # Stessa chiave name di read_email: Rossi / Mario Rossi / 1.
+                "name": string_param(
+                    "Indice, cognome come Rossi, o nome e cognome come "
+                    "Mario Rossi, dell'email già in lista."
+                ),
+                "body": string_param("Testo della risposta in italiano."),
+            },
+            required=("name", "body"),
         ),
     ),
     ToolDeclaration(
@@ -119,6 +153,7 @@ GMAIL_TOOL_MAP: dict[str, Any] = {
     _TOOL_READ: read_email,
     _TOOL_SAVE: save_attachments,
     _TOOL_DRAFT: draft_email,
+    _TOOL_REPLY: reply_email,
     _TOOL_SEND: send_email,
 }
 
@@ -126,27 +161,39 @@ _ALLOWED_TOOLS = frozenset(GMAIL_TOOL_MAP)
 GMAIL_GEMINI_TOOLS = to_gemini_tools(GMAIL_TOOL_DECLARATIONS)
 
 _GMAIL_INTRO_TEXT = (
-    "Agente Gmail: posso elencare, leggere le email, salvare gli allegati "
-    "e inviare dopo una conferma. Di' esci per terminare."
+    "Agente Gmail: posso elencare, leggere le email, salvare gli allegati, "
+    "rispondere e inviare dopo una conferma. Di' esci per terminare."
 )
 
 # Prompt: identità e regole. Gli schemi stanno nelle declaration.
 # Stesso vincolo TTS del master FS: elenchi email in frasi, non markdown.
 _SYSTEM_PROMPT = (
     "Sei l'assistente vocale Gmail. Usa i tool per elencare, leggere, "
-    "salvare allegati e preparare email. Un solo tool per enunciato. "
+    "salvare allegati, preparare email e rispondere ai thread. "
+    "Un solo tool per enunciato. "
     "Dopo un tool, riassumi in italiano. Non inventare id Gmail.\n\n"
     "Per elencare o cercare usa list_emails con query libera "
     "(inbox, is:unread, from:mario, fattura). Per contare usa count true. "
     "Giorni: newer_than:3d. Ore: lascia l'italiano in query.\n"
     "Per leggere o salvare allegati usa name: indice parlato, mittente o oggetto. "
     "save_attachments solo se l'utente lo chiede, mai in automatico.\n"
-    "Per scrivere: draft_email con to, subject e body. Non chiamare send_email "
-    "finché l'utente non ha confermato a voce (sì/no lo gestisce Python).\n\n"
+    "L'indirizzo completo non lo inventi: lo riempie Python dalla riga in "
+    "sessione, From o Reply-To. In to di draft_email e in name di "
+    "reply_email o read_email passa cognome, nome e cognome, o indice "
+    "della mail già elencata. Vietato inventare @ o domini.\n"
+    "Per scrivere una mail nuova: draft_email con to, subject e body. "
+    "Per rispondere a un thread: reply_email con name e body, niente to "
+    "né subject. Dopo il tool non spellingare l'indirizzo: lo dice già "
+    "la conferma Python. Non chiamare send_email finché l'utente non ha "
+    "confermato a voce (sì/no lo gestisce Python).\n\n"
     "Esempi: «ultime email» → list_emails query inbox. "
+    "«ultime di Rossi» → list_emails query from:rossi. "
     "«leggi la seconda» → read_email name la seconda. "
     "«scarica gli allegati della prima» → save_attachments name 1. "
-    "«invia a mario@x.test oggetto Fattura testo Pagare venerdì» → draft_email.\n\n"
+    "«scrivi a Rossi oggetto Preventivo testo Arrivo mercoledì» → "
+    "draft_email to Rossi. "
+    "«rispondi a Rossi che ok» → reply_email name Rossi body ok. "
+    "«rispondi alla prima» → reply_email name 1.\n\n"
     f"{SPOKEN_REPLY_RULE}"
 )
 
@@ -203,6 +250,13 @@ def dispatch_gmail_tool(tool: str, args: dict[str, Any]) -> str:
             body=args_dict.get("body", ""),
         )
 
+    if tool == _TOOL_REPLY:
+        # name può arrivare integer da Gemini (1); _as_name lo rende cifra.
+        return reply_email(
+            name=_as_name(args_dict.get("name")),
+            body=args_dict.get("body", ""),
+        )
+
     if tool == _TOOL_SEND:
         # Nessun argomento: la bozza e il flag HITL stanno nella sessione.
         return send_email()
@@ -233,8 +287,8 @@ def _normalize_hitl_utterance(text: str) -> str:
 
 
 def gmail_hitl_after_tool(tool: str, result: str) -> str | None:
-    """Dopo draft_email OK: parla la richiesta di conferma e salta Gemini."""
-    if tool != _TOOL_DRAFT or not result.startswith("OK:"):
+    """Dopo draft_email / reply_email OK: parla la conferma e salta Gemini."""
+    if tool not in _HITL_DRAFT_TOOLS or not result.startswith("OK:"):
         return None
     # Togliamo il prefisso OK: dal TTS: l'utente sente solo la frase.
     return result[3:].strip()
@@ -271,7 +325,7 @@ def gmail_hitl_on_utterance(text: str) -> str | None:
 GMAIL_AGENT_SPEC = AgentSpec(
     name="gmail",
     role="Assistente Gmail vocale",
-    goal="Elencare, leggere, salvare allegati e inviare email dopo conferma HITL.",
+    goal="Elencare, leggere, salvare allegati, rispondere e inviare dopo HITL.",
     tools=tuple(GMAIL_TOOL_MAP),
     dispatch=dispatch_gmail_tool,
     intro_text=_GMAIL_INTRO_TEXT,

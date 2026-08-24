@@ -43,8 +43,14 @@ def test_fs_and_gmail_catalogs_are_isolated() -> None:
         "read_file",
         "find_file",
     }
-    assert "list_emails" in gmail_names
-    assert "draft_email" in gmail_names
+    assert gmail_names == {
+        "list_emails",
+        "read_email",
+        "save_attachments",
+        "draft_email",
+        "reply_email",
+        "send_email",
+    }
     assert "append_note" not in gmail_names
     assert "list_emails" not in fs_names
     assert MASTER_AGENT_SPEC.name == "fs"
