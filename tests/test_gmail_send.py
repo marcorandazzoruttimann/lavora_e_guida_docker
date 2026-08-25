@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable, Iterator
+from email import message_from_string
+from email.utils import getaddresses
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,8 @@ from lavora_e_guida.gmail.agent import (
     GMAIL_LOOP_SPEC,
     GMAIL_TOOL_DECLARATIONS,
     dispatch_gmail_tool,
+    gmail_hitl_after_tool,
+    gmail_hitl_on_utterance,
 )
 from lavora_e_guida.gmail.oauth import (
     GMAIL_SCOPES,
@@ -45,8 +49,10 @@ from lavora_e_guida.gmail.send import (
     MSG_NEED_CONFIRM,
     MSG_NO_DRAFT,
     MSG_NO_LISTED_ADDRESS,
+    MSG_NO_REPLY_ALL_RECIPIENTS,
     draft_email,
     get_draft_session,
+    reply_all_email,
     reply_email,
     reset_draft_session,
     send_email,
@@ -85,6 +91,8 @@ def _rossi_mailbox(
     rfc_message_id: str = _ROSSI_MESSAGE_ID,
     rfc_references: str = "",
     subject: str = "Fattura",
+    to_addresses: tuple[str, ...] = (),
+    cc_addresses: tuple[str, ...] = (),
 ) -> MailboxSession:
     """Lista vocale con Mario Rossi: From/Reply-To e thread in sessione."""
     box = MailboxSession()
@@ -98,6 +106,8 @@ def _rossi_mailbox(
         thread_id=thread_id,
         rfc_message_id=rfc_message_id,
         rfc_references=rfc_references,
+        to_addresses=to_addresses,
+        cc_addresses=cc_addresses,
     )
     items = [rossi]
     if extra:
@@ -164,6 +174,7 @@ def test_draft_email_stores_session_without_http() -> None:
     assert session.draft.thread_id == ""
     assert session.draft.in_reply_to == ""
     assert session.draft.references == ""
+    assert session.draft.cc == ""
 
 
 def test_draft_email_rejects_spoken_to_without_list(
@@ -443,6 +454,130 @@ def test_send_reply_posts_thread_id_and_in_reply_to(
     assert get_draft_session().draft is None
 
 
+def test_send_reply_all_posts_to_cc_without_gmail_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reply_all confermata: MIME To e Cc, threadId, In-Reply-To, GMAIL_USER assente."""
+    box = _rossi_mailbox(
+        to_addresses=(_USER, "anna@x.test"),
+        cc_addresses=("segreteria@x.test",),
+    )
+    reply_all_email("Rossi", "ok", mailbox=box, settings=_settings(tmp_path))
+    get_draft_session().mark_confirmed()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["threadId"] == _ROSSI_THREAD
+        decoded = _decode_rfc822_raw(payload["raw"])
+        msg = message_from_string(decoded)
+        to_addrs = [addr for _name, addr in getaddresses([msg["To"] or ""])]
+        cc_addrs = [addr for _name, addr in getaddresses([msg["Cc"] or ""])]
+        assert "mario.rossi@x.test" in to_addrs
+        assert "anna@x.test" in to_addrs
+        assert "segreteria@x.test" in cc_addrs
+        assert _USER not in to_addrs
+        assert _USER not in cc_addrs
+        assert "In-Reply-To:" in decoded
+        assert _ROSSI_MESSAGE_ID in decoded
+        return httpx.Response(200, json={"id": "sent-reply-all"})
+
+    _patch_gmail_send_http(monkeypatch, handler)
+    result = send_email(settings=_settings(tmp_path))
+    assert result.startswith("OK:")
+    assert get_draft_session().draft is None
+
+
+@pytest.mark.parametrize(
+    ("status", "phrase"),
+    [
+        (400, "Ha rifiutato l'invio, controlla i destinatari e riprova"),
+        (422, "Ha rifiutato l'invio, controlla i destinatari e riprova"),
+        (429, "Gmail è occupata, riprova tra poco"),
+        (500, "Gmail non raggiungibile, riprova più tardi"),
+        (503, "Gmail non raggiungibile, riprova più tardi"),
+        (409, "Invio non riuscito, riprova più tardi"),
+    ],
+)
+def test_send_email_http_error_speaks_code_and_italian_phrase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    phrase: str,
+) -> None:
+    """POST >= 400 (non 401/403): Gmail HTTP {code} più frase; bozza resta."""
+    draft_email("mario@x.test", "Fattura", "Pagare.")
+    get_draft_session().mark_confirmed()
+    # JSON error Gmail: deve restare fuori dal TTS, si parla solo codice+frase.
+    gmail_json = {"error": {"code": status, "message": "Invalid to header"}}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=gmail_json)
+
+    _patch_gmail_send_http(monkeypatch, handler)
+    result = send_email(settings=_settings(tmp_path))
+    assert result == f"ERRORE: Gmail HTTP {status}. {phrase}"
+    assert "Invalid to header" not in result
+    session = get_draft_session()
+    assert session.draft is not None
+    assert session.draft.to == "mario@x.test"
+    assert session.awaiting_confirm is True
+    assert session.confirmed is False
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_send_email_http_auth_error_stays_not_linked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    """401/403 sull'invio: Gmail non collegata, niente Gmail HTTP {code}."""
+    draft_email("mario@x.test", "Fattura", "Pagare.")
+    get_draft_session().mark_confirmed()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"code": status}})
+
+    _patch_gmail_send_http(monkeypatch, handler)
+    result = send_email(settings=_settings(tmp_path))
+    assert result == MSG_GMAIL_NOT_LINKED
+    assert f"Gmail HTTP {status}" not in result
+    assert get_draft_session().draft is not None
+
+
+@pytest.mark.parametrize(
+    ("status", "phrase"),
+    [
+        (400, "Ha rifiutato l'invio, controlla i destinatari e riprova"),
+        (500, "Gmail non raggiungibile, riprova più tardi"),
+    ],
+)
+def test_hitl_yes_http_error_speaks_code_and_keeps_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    phrase: str,
+) -> None:
+    """Sì HITL su POST 400/500: parla Gmail HTTP {code} e la frase; bozza resta."""
+    draft_email("mario@x.test", "Fattura", "Pagare.")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status,
+            json={"error": {"code": status, "message": "Invalid to header"}},
+        )
+
+    _patch_gmail_send_http(monkeypatch, handler)
+    spoken = gmail_hitl_on_utterance("sì")
+    assert spoken == f"ERRORE: Gmail HTTP {status}. {phrase}"
+    assert "Invalid to header" not in (spoken or "")
+    session = get_draft_session()
+    assert session.draft is not None
+    assert session.draft.to == "mario@x.test"
+    assert session.awaiting_confirm is True
+    assert session.confirmed is False
+
+
 def test_dispatch_draft_and_send_unknown() -> None:
     """Whitelist: send senza bozza è ERRORE; draft via dispatch popola la sessione."""
     assert dispatch_gmail_tool("send_email", {}) == MSG_NO_DRAFT
@@ -526,18 +661,29 @@ def test_gmail_prompt_and_catalog_instruct_spoken_recipients() -> None:
     assert "draft_email to Rossi" in prompt
     assert "reply_email name Rossi" in prompt
     assert "reply_email name 1" in prompt
+    assert "rispondi a tutti" in prompt
+    assert "reply_all_email name Rossi" in prompt
+    # Esempi del piano: Rossi → reply; «rispondi a tutti» → reply_all (name 1 o Rossi).
+    assert "rispondi a Rossi che ok" in prompt
+    assert "reply_email name Rossi body ok" in prompt
+    assert "reply_all_email name 1" in prompt
+    assert "reply_all_email name Rossi body ok" in prompt
+    # Niente People API nel prompt: gli @ escono dalla riga in sessione.
+    assert "people" not in prompt.casefold()
     # Gli schemi stanno nelle functionDeclarations, non come {"tool":...} nel system.
     assert '{"tool": "draft_email"' not in prompt
     assert '{"tool": "reply_email"' not in prompt
+    assert '{"tool": "reply_all_email"' not in prompt
 
     by_name = {item.name: item for item in GMAIL_TOOL_DECLARATIONS}
-    # Niente People API né tool extra: solo reply_email in più sul catalogo send.
+    # Niente People API né tool extra: catalogo send + reply_email + reply_all_email.
     assert set(by_name) == {
         "list_emails",
         "read_email",
         "save_attachments",
         "draft_email",
         "reply_email",
+        "reply_all_email",
         "send_email",
     }
     draft = by_name["draft_email"]
@@ -566,6 +712,17 @@ def test_gmail_prompt_and_catalog_instruct_spoken_recipients() -> None:
     assert "<" not in name_desc
     assert "{" not in name_desc
 
+    reply_all = by_name["reply_all_email"]
+    assert "name" in reply_all.parameters["properties"]
+    assert "body" in reply_all.parameters["properties"]
+    assert "to" not in reply_all.parameters["properties"]
+    assert "all" not in reply_all.parameters["properties"]
+    assert "people" not in reply_all.description.casefold()
+    all_name = reply_all.parameters["properties"]["name"]["description"]
+    assert "Rossi" in all_name
+    assert "<" not in all_name
+    assert "{" not in all_name
+
     assert GMAIL_LOOP_SPEC.gemini_tools is not None
     decls = GMAIL_LOOP_SPEC.gemini_tools[0]["functionDeclarations"]
     decl_names = [item["name"] for item in decls]
@@ -575,8 +732,22 @@ def test_gmail_prompt_and_catalog_instruct_spoken_recipients() -> None:
         "save_attachments",
         "draft_email",
         "reply_email",
+        "reply_all_email",
         "send_email",
     ]
+
+
+def test_gmail_hitl_after_tool_includes_reply_all() -> None:
+    """Stesso gate HITL di draft/reply: reply_all_email OK parla e salta Gemini."""
+    spoken = (
+        "ho preparato un'email a mario.rossi@x.test, oggetto Re: Fattura. "
+        "Il testo è: ok. Di' sì per inviare o no per annullare."
+    )
+    assert gmail_hitl_after_tool("reply_all_email", "OK: " + spoken) == spoken
+    assert gmail_hitl_after_tool("reply_email", "OK: " + spoken) == spoken
+    assert gmail_hitl_after_tool("draft_email", "OK: " + spoken) == spoken
+    assert gmail_hitl_after_tool("send_email", "OK: " + spoken) is None
+    assert gmail_hitl_after_tool("reply_all_email", "ERRORE: nessuno") is None
 
 
 class _ScriptedLLM:
@@ -810,6 +981,240 @@ def test_hitl_yes_after_reply_posts_thread(
     assert "email inviata a mario.rossi@x.test" in spoken
     assert llm.calls == 1
     assert get_draft_session().draft is None
+
+
+
+def test_reply_all_email_fills_to_cc_without_gmail_user(tmp_path: Path) -> None:
+    """reply_all: To = mittente + To originali senza me; Cc = gli altri; HITL ordinale."""
+    box = _rossi_mailbox(
+        to_addresses=(_USER, "anna@x.test"),
+        cc_addresses=("segreteria@x.test",),
+    )
+    result = reply_all_email("Rossi", "ok", mailbox=box, settings=_settings(tmp_path))
+    assert result.startswith("OK:")
+    assert "mario.rossi@x.test, a anna@x.test e a segreteria@x.test" in result
+    assert "A:" not in result
+    assert "Cc:" not in result
+    assert _USER not in result
+    session = get_draft_session()
+    assert session.draft is not None
+    assert session.draft.to == "mario.rossi@x.test, anna@x.test"
+    assert session.draft.cc == "segreteria@x.test"
+    assert session.draft.subject == "Re: Fattura"
+    assert session.draft.thread_id == _ROSSI_THREAD
+    assert session.draft.in_reply_to == _ROSSI_MESSAGE_ID
+    assert session.awaiting_confirm is True
+
+
+def test_reply_all_email_only_me_in_to_others_in_cc(tmp_path: Path) -> None:
+    """Solo io in To e altri in Cc: To = mittente, Cc = gli altri."""
+    box = _rossi_mailbox(
+        to_addresses=(_USER,),
+        cc_addresses=("anna@x.test", "segreteria@x.test"),
+    )
+    result = reply_all_email("Rossi", "ok", mailbox=box, settings=_settings(tmp_path))
+    assert result.startswith("OK:")
+    session = get_draft_session()
+    assert session.draft is not None
+    assert session.draft.to == "mario.rossi@x.test"
+    assert session.draft.cc == "anna@x.test, segreteria@x.test"
+    assert _USER.casefold() not in session.draft.to.casefold()
+    assert _USER.casefold() not in session.draft.cc.casefold()
+    assert "mario.rossi@x.test, a anna@x.test e a segreteria@x.test" in result
+
+
+def test_reply_all_email_only_me_in_to_prefers_reply_to(tmp_path: Path) -> None:
+    """Solo io in To: mittente = Reply-To se valido, Cc = gli altri, senza me."""
+    box = _rossi_mailbox(
+        reply_to_address="segreteria-reply@x.test",
+        to_addresses=(_USER,),
+        cc_addresses=("anna@x.test",),
+    )
+    result = reply_all_email("Rossi", "ok", mailbox=box, settings=_settings(tmp_path))
+    assert result.startswith("OK:")
+    session = get_draft_session()
+    assert session.draft is not None
+    assert session.draft.to == "segreteria-reply@x.test"
+    assert session.draft.cc == "anna@x.test"
+    assert "mario.rossi@x.test" not in session.draft.to
+    assert _USER.casefold() not in session.draft.to.casefold()
+    assert _USER.casefold() not in session.draft.cc.casefold()
+
+
+def test_reply_all_email_excludes_gmail_user_casefold(tmp_path: Path) -> None:
+    """GMAIL_USER in To/Cc con casing diverso: comunque escluso da entrambi."""
+    box = _rossi_mailbox(
+        to_addresses=("Tester@Gmail.com", "anna@x.test"),
+        cc_addresses=("TESTER@gmail.com", "segreteria@x.test"),
+    )
+    result = reply_all_email("Rossi", "ok", mailbox=box, settings=_settings(tmp_path))
+    assert result.startswith("OK:")
+    session = get_draft_session()
+    assert session.draft is not None
+    assert session.draft.to == "mario.rossi@x.test, anna@x.test"
+    assert session.draft.cc == "segreteria@x.test"
+    assert "tester@gmail.com" not in session.draft.to.casefold()
+    assert "tester@gmail.com" not in session.draft.cc.casefold()
+
+
+def test_reply_all_email_empty_to_after_filter_is_spoken_error(tmp_path: Path) -> None:
+    """Ero l'unico in To e From non parsabile: errore parlante, niente bozza."""
+    box = _rossi_mailbox(
+        from_address="",
+        reply_to_address="",
+        to_addresses=(_USER,),
+        cc_addresses=("anna@x.test",),
+    )
+    result = reply_all_email("Rossi", "ok", mailbox=box, settings=_settings(tmp_path))
+    assert result == MSG_NO_REPLY_ALL_RECIPIENTS
+    assert get_draft_session().draft is None
+
+
+def test_reply_all_email_degenerate_single_recipient(tmp_path: Path) -> None:
+    """Un solo @ restante è comunque reply-all degenere: si prepara, HITL dice uno."""
+    box = _rossi_mailbox()
+    result = reply_all_email("Rossi", "ok", mailbox=box, settings=_settings(tmp_path))
+    assert result.startswith("OK:")
+    assert "mario.rossi@x.test" in result
+    assert " e a " not in result
+    session = get_draft_session()
+    assert session.draft is not None
+    assert session.draft.to == "mario.rossi@x.test"
+    assert session.draft.cc == ""
+
+
+def test_reply_email_does_not_copy_to_cc(tmp_path: Path) -> None:
+    """reply_email resta solo mittente anche se la riga ha To/Cc."""
+    box = _rossi_mailbox(
+        to_addresses=(_USER, "anna@x.test"),
+        cc_addresses=("segreteria@x.test",),
+    )
+    result = reply_email("Rossi", "ok", mailbox=box)
+    assert result.startswith("OK:")
+    assert "anna@x.test" not in result
+    assert "segreteria@x.test" not in result
+    session = get_draft_session()
+    assert session.draft is not None
+    assert session.draft.to == "mario.rossi@x.test"
+    assert session.draft.cc == ""
+
+
+def test_dispatch_reply_all_email_from_global_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemini passa name=Rossi: dispatch usa mailbox globale e GMAIL_USER da settings."""
+    monkeypatch.setattr(send_mod, "get_settings", lambda: _settings(tmp_path))
+    listed = _rossi_mailbox(
+        to_addresses=(_USER, "anna@x.test"),
+        cc_addresses=("segreteria@x.test",),
+    )
+    get_mailbox_session().replace(
+        listed.items,
+        query=listed.last_query,
+        gmail_q=listed.last_gmail_q,
+    )
+    out = dispatch_gmail_tool("reply_all_email", {"name": "Rossi", "body": "ok"})
+    assert out.startswith("OK:")
+    session = get_draft_session()
+    assert session.draft is not None
+    assert session.draft.to == "mario.rossi@x.test, anna@x.test"
+    assert session.draft.cc == "segreteria@x.test"
+
+
+def test_dispatch_reply_all_email_integer_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Indice integer 1: stessa riga di reply_email."""
+    monkeypatch.setattr(send_mod, "get_settings", lambda: _settings(tmp_path))
+    listed = _rossi_mailbox(to_addresses=("anna@x.test",), cc_addresses=())
+    get_mailbox_session().replace(
+        listed.items,
+        query=listed.last_query,
+        gmail_q=listed.last_gmail_q,
+    )
+    out = dispatch_gmail_tool("reply_all_email", {"name": 1, "body": "ok"})
+    assert out.startswith("OK:")
+    session = get_draft_session()
+    assert session.draft is not None
+    assert "mario.rossi@x.test" in session.draft.to
+
+
+def test_dispatch_reply_all_email_empty_name() -> None:
+    """name assente: stesso errore parlante di reply_email."""
+    assert dispatch_gmail_tool("reply_all_email", {"body": "ok"}) == MSG_EMPTY_NAME
+    assert get_draft_session().draft is None
+
+
+def test_hitl_yes_after_reply_all_posts_to_cc_and_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turno 1: reply_all_email. Turno 2: sì → MIME To e Cc, threadId, senza GMAIL_USER."""
+    monkeypatch.setattr(send_mod, "get_settings", lambda: _settings(tmp_path))
+    listed = _rossi_mailbox(
+        to_addresses=(_USER, "anna@x.test"),
+        cc_addresses=("segreteria@x.test",),
+    )
+    get_mailbox_session().replace(
+        listed.items,
+        query=listed.last_query,
+        gmail_q=listed.last_gmail_q,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["threadId"] == _ROSSI_THREAD
+        decoded = _decode_rfc822_raw(payload["raw"])
+        msg = message_from_string(decoded)
+        to_addrs = [addr for _name, addr in getaddresses([msg["To"] or ""])]
+        cc_addrs = [addr for _name, addr in getaddresses([msg["Cc"] or ""])]
+        assert "mario.rossi@x.test" in to_addrs
+        assert "anna@x.test" in to_addrs
+        assert "segreteria@x.test" in cc_addrs
+        assert _USER not in to_addrs
+        assert _USER not in cc_addrs
+        assert "In-Reply-To:" in decoded
+        assert _ROSSI_MESSAGE_ID in decoded
+        return httpx.Response(200, json={"id": "sent-reply-all-hitl"})
+
+    _patch_gmail_send_http(monkeypatch, handler)
+    llm = _ScriptedLLM(
+        [
+            LlmTurn(
+                function_calls=(
+                    FunctionCall(
+                        name="reply_all_email",
+                        args={"name": "Rossi", "body": "ok"},
+                    ),
+                ),
+            ),
+        ]
+    )
+    outfile = StringIO()
+    code = run_chat_loop(
+        MockSTT(
+            infile=StringIO("rispondi a tutti a rossi\nsì\nesci\n"),
+            outfile=outfile,
+            prompt="",
+        ),
+        MockTTS(outfile=outfile, prefix="[TTS] "),
+        llm,
+        report_latency=False,
+        telemetry_db=tmp_path / "telemetry.db",
+        spec=GMAIL_LOOP_SPEC,
+    )
+    assert code == 0
+    spoken = outfile.getvalue()
+    assert "mario.rossi@x.test" in spoken
+    assert "anna@x.test" in spoken
+    assert "segreteria@x.test" in spoken
+    assert "sì per inviare" in spoken
+    assert "ok" in spoken
+    assert llm.calls == 1
+    assert get_draft_session().draft is None
+
 
 
 def test_readonly_token_blocks_send_credentials(tmp_path: Path) -> None:

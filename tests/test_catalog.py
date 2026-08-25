@@ -49,6 +49,7 @@ def test_fs_and_gmail_catalogs_are_isolated() -> None:
         "save_attachments",
         "draft_email",
         "reply_email",
+        "reply_all_email",
         "send_email",
     }
     assert "append_note" not in gmail_names

@@ -192,7 +192,7 @@ class LoopSpec:
     gemini_tools: list[dict[str, Any]] | None = None
     # None = nessun dump a terminale (solo functionResponse verso il modello).
     print_tool_result: ToolResultPrinter | None = None
-    # Gmail: dopo draft_email / reply_email parla la conferma e salta Gemini.
+    # Gmail: dopo draft_email / reply_email / reply_all_email parla la conferma e salta Gemini.
     hitl_after_tool: HitlAfterTool | None = None
     # Gmail: sì/no sull'utterance successiva, senza LLM.
     hitl_on_utterance: HitlOnUtterance | None = None

@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from email.header import decode_header, make_header
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -34,6 +34,7 @@ from lavora_e_guida.gmail.oauth import (
     MSG_GMAIL_NOT_LINKED,
     MSG_PROFILE_UNREACHABLE,
     GmailAuthError,
+    _spoken_http_status,
     get_gmail_credentials,
 )
 
@@ -236,9 +237,9 @@ class RealAttachment:
 class MailboxItem:
     """Una riga della lista vocale: id solo per la GET successiva, mai in reply.
 
-    I campi thread/indirizzo (thread_id, from_address, Reply-To, Message-ID)
-    restano in sessione per draft/reply Python: lista e lettura TTS continuano
-    a dire solo mittente e oggetto, senza spellingare l'@ in auto.
+    I campi thread/indirizzo (thread_id, from_address, Reply-To, Message-ID,
+    To, Cc) restano in sessione per draft/reply Python: lista e lettura TTS
+    continuano a dire solo mittente e oggetto, senza spellingare l'@ in auto.
     """
 
     gmail_id: str
@@ -258,6 +259,10 @@ class MailboxItem:
     rfc_message_id: str = ""
     # References grezzo: il send lo concatena col Message-ID; vuoto se assente.
     rfc_references: str = ""
+    # To originali (tutti gli @, ordine stabile): reply-all li filtra; mai in TTS.
+    to_addresses: tuple[str, ...] = ()
+    # Cc originali, stessa regola: sessione sì, lista/lettura parlata no.
+    cc_addresses: tuple[str, ...] = ()
 
 
 @dataclass
@@ -470,6 +475,30 @@ def _address_from_header(header: str) -> str:
     return email
 
 
+def _addresses_from_header(header: str) -> tuple[str, ...]:
+    """Tutti gli @ SMTP di un header To/Cc: getaddresses, non parseaddr.
+
+    parseaddr tiene solo il primo nome; To e Cc sono liste (`Mario <a@x>,
+    Anna <b@x>`). Header vuoto o senza '@' → tuple vuota: reply-all filtra
+    più a valle, niente dominio inventato. RFC2047 sul display si decodifica
+    prima del parse, come per From/Reply-To.
+    """
+    # Stesso decode MIME encoded-word di `_address_from_header`.
+    decoded = _decode_rfc2047(header)
+    if not decoded:
+        return ()
+    # getaddresses vuole una sequenza di valori: una stringa sola verrebbe
+    # iterata carattere per carattere e spezzerebbe l'indirizzo.
+    parsed: list[str] = []
+    for _display, address in getaddresses([decoded]):
+        email = (address or "").strip()
+        # Stesso filtro di `_address_from_header`: senza '@' non è SMTP.
+        if "@" not in email:
+            continue
+        parsed.append(email)
+    return tuple(parsed)
+
+
 def _subject_from_header(subject_header: str) -> str:
     """Oggetto parlante; vuoto → formula fissa, niente stringa MIME cruda."""
     decoded = _decode_rfc2047(subject_header)
@@ -477,7 +506,7 @@ def _subject_from_header(subject_header: str) -> str:
 
 
 def _header_map(payload: dict[str, Any]) -> dict[str, str]:
-    """Ultima occorrenza per nome header (From/Subject/Reply-To/Message-ID), case-insensitive."""
+    """Ultima occorrenza per nome header (From/Subject/To/Cc/Reply-To/Message-ID), case-insensitive."""
     found: dict[str, str] = {}
     headers = payload.get("headers")
     if not isinstance(headers, list):
@@ -879,8 +908,9 @@ def item_from_message(message: dict[str, Any]) -> MailboxItem | None:
     """Costruisce una riga di sessione da un resource Gmail (metadata o full).
 
     Mittente e oggetto restano i soli campi parlati. threadId (JSON top-level)
-    e gli header From/Reply-To/Message-ID/References restano in sessione per
-    far risolvere l'indirizzo e il thread a Python, non a Gemini.
+    e gli header From/To/Cc/Reply-To/Message-ID/References restano in sessione
+    per far risolvere indirizzi e thread a Python, non a Gemini. To e Cc si
+    parsano con getaddresses: parseaddr terrebbe solo il primo destinatario.
     """
     gmail_id = message.get("id")
     if not isinstance(gmail_id, str) or not gmail_id.strip():
@@ -894,6 +924,9 @@ def item_from_message(message: dict[str, Any]) -> MailboxItem | None:
     reply_to_raw = headers.get("reply-to", "")
     message_id_raw = headers.get("message-id", "")
     references_raw = headers.get("references", "")
+    # To/Cc: liste di @, non parlati; servono al reply-all, non al TTS lista.
+    to_raw = headers.get("to", "")
+    cc_raw = headers.get("cc", "")
     # threadId non è un header RFC: Gmail lo mette sul resource anche in format=metadata.
     thread_raw = message.get("threadId")
     thread_id = thread_raw.strip() if isinstance(thread_raw, str) else ""
@@ -910,6 +943,8 @@ def item_from_message(message: dict[str, Any]) -> MailboxItem | None:
         reply_to_address=_address_from_header(reply_to_raw),
         rfc_message_id=message_id_raw.strip(),
         rfc_references=references_raw.strip(),
+        to_addresses=_addresses_from_header(to_raw),
+        cc_addresses=_addresses_from_header(cc_raw),
     )
 
 
@@ -1006,7 +1041,11 @@ def _gmail_get_json(
     *,
     params: Any = None,
 ) -> dict[str, Any]:
-    """GET JSON Gmail: 401/403 → auth parlante; rete → non raggiungibile; mai browser."""
+    """GET JSON Gmail: 401/403 → auth parlante; 404 → MSG_GONE; rete → non raggiungibile.
+
+    Altri status >= 400: codice HTTP più frase italiana (`kind=get`), niente
+    JSON error Gmail nel TTS. Mai un browser: il token arriva già rinfrescato.
+    """
     try:
         response = http.get(url, headers=headers, params=params)
     except httpx.HTTPError as exc:
@@ -1014,9 +1053,11 @@ def _gmail_get_json(
     if response.status_code in (401, 403):
         raise GmailAuthError(MSG_GMAIL_NOT_LINKED)
     if response.status_code == 404:
+        # Email (o allegato) sparita: parlato senza codice, non è un 400/5xx.
         raise GmailReadError(MSG_GONE)
     if response.status_code >= 400:
-        raise GmailAuthError(f"ERRORE: Gmail HTTP {response.status_code}")
+        # Stesso schema del send/profile: `Gmail HTTP {code}` più frase italiana.
+        raise GmailAuthError(_spoken_http_status(response.status_code, "get"))
     try:
         payload = response.json()
     except json.JSONDecodeError as exc:
@@ -1182,9 +1223,9 @@ def list_emails(
             # Inbox vuota: Gmail omette `messages`; non è un errore, è lista vuota.
             ids = _message_ids_from_listing(listing)
             items: list[MailboxItem] = []
-            # N+1: id dalla list; From/Subject/Reply-To/Message-ID e flag allegati
-            # dal dettaglio metadata (filename/size/disposition, niente body).
-            # threadId arriva nel JSON del messaggio, non come metadataHeader.
+            # N+1: id dalla list; From/Subject/To/Cc/Reply-To/Message-ID e flag
+            # allegati dal dettaglio metadata (filename/size/disposition, niente
+            # body). threadId arriva nel JSON del messaggio, non come header.
             for gmail_id in ids[:max_results]:
                 detail = _gmail_get_json(
                     http,
@@ -1197,6 +1238,8 @@ def list_emails(
                         ("metadataHeaders", "Message-ID"),
                         ("metadataHeaders", "Reply-To"),
                         ("metadataHeaders", "References"),
+                        ("metadataHeaders", "To"),
+                        ("metadataHeaders", "Cc"),
                     ],
                 )
                 item = item_from_message(detail)

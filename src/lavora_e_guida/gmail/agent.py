@@ -5,7 +5,7 @@ Questo modulo è lo specialista email. Importa da `lavora_e_guida.agent` solo
 Il master non importa questo file: niente list/read/save/draft/reply/send sul FS.
 
 I tool sono `functionDeclarations` Gemini. L'invio passa da `draft_email` o
-`reply_email` e da un sì vocale in Python: Gemini non può saltare la conferma.
+`reply_email` / `reply_all_email` e da un sì vocale in Python: Gemini non può saltare la conferma.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from lavora_e_guida.gmail.read import (
 from lavora_e_guida.gmail.send import (
     draft_email,
     get_draft_session,
+    reply_all_email,
     reply_email,
     send_email,
     spoken_draft_confirm,
@@ -41,10 +42,11 @@ _TOOL_READ = "read_email"
 _TOOL_SAVE = "save_attachments"
 _TOOL_DRAFT = "draft_email"
 _TOOL_REPLY = "reply_email"
+_TOOL_REPLY_ALL = "reply_all_email"
 _TOOL_SEND = "send_email"
 
 # draft e reply condividono lo stesso interceptor sì/no del loop.
-_HITL_DRAFT_TOOLS = frozenset({_TOOL_DRAFT, _TOOL_REPLY})
+_HITL_DRAFT_TOOLS = frozenset({_TOOL_DRAFT, _TOOL_REPLY, _TOOL_REPLY_ALL})
 
 # Catalogo Gmail isolato: il master FS non importa questo modulo.
 GMAIL_TOOL_DECLARATIONS: tuple[ToolDeclaration, ...] = (
@@ -139,6 +141,27 @@ GMAIL_TOOL_DECLARATIONS: tuple[ToolDeclaration, ...] = (
         ),
     ),
     ToolDeclaration(
+        name=_TOOL_REPLY_ALL,
+        description=(
+            "Risponde a tutti (To e Cc) di un'email già elencata. "
+            "In name passa cognome, nome e cognome, o indice, come reply_email. "
+            "Non inventare @, oggetto o threadId: li riempie Python da "
+            "From, Reply-To, To e Cc. Non invia. Dopo la bozza l'utente dice sì o no. "
+            "Non spellingare l'indirizzo nella reply parlata."
+        ),
+        parameters=object_schema(
+            {
+                # Stesso schema di reply_email: Rossi / Mario Rossi / 1, niente flag all.
+                "name": string_param(
+                    "Indice, cognome come Rossi, o nome e cognome come "
+                    "Mario Rossi, dell'email già in lista."
+                ),
+                "body": string_param("Testo della risposta in italiano."),
+            },
+            required=("name", "body"),
+        ),
+    ),
+    ToolDeclaration(
         name=_TOOL_SEND,
         description=(
             "Invia la bozza già confermata. Non chiamare se l'utente non ha "
@@ -154,6 +177,7 @@ GMAIL_TOOL_MAP: dict[str, Any] = {
     _TOOL_SAVE: save_attachments,
     _TOOL_DRAFT: draft_email,
     _TOOL_REPLY: reply_email,
+    _TOOL_REPLY_ALL: reply_all_email,
     _TOOL_SEND: send_email,
 }
 
@@ -182,10 +206,11 @@ _SYSTEM_PROMPT = (
     "reply_email o read_email passa cognome, nome e cognome, o indice "
     "della mail già elencata. Vietato inventare @ o domini.\n"
     "Per scrivere una mail nuova: draft_email con to, subject e body. "
-    "Per rispondere a un thread: reply_email con name e body, niente to "
-    "né subject. Dopo il tool non spellingare l'indirizzo: lo dice già "
-    "la conferma Python. Non chiamare send_email finché l'utente non ha "
-    "confermato a voce (sì/no lo gestisce Python).\n\n"
+    "Per rispondere al solo mittente: reply_email con name e body, niente to "
+    "né subject. Per rispondere a tutti sul thread: reply_all_email con "
+    "name e body, niente to né subject. Dopo il tool non spellingare "
+    "l'indirizzo: lo dice già la conferma Python. Non chiamare send_email "
+    "finché l'utente non ha confermato a voce (sì/no lo gestisce Python).\n\n"
     "Esempi: «ultime email» → list_emails query inbox. "
     "«ultime di Rossi» → list_emails query from:rossi. "
     "«leggi la seconda» → read_email name la seconda. "
@@ -193,7 +218,9 @@ _SYSTEM_PROMPT = (
     "«scrivi a Rossi oggetto Preventivo testo Arrivo mercoledì» → "
     "draft_email to Rossi. "
     "«rispondi a Rossi che ok» → reply_email name Rossi body ok. "
-    "«rispondi alla prima» → reply_email name 1.\n\n"
+    "«rispondi alla prima» → reply_email name 1. "
+    "«rispondi a tutti» → reply_all_email name 1. "
+    "«rispondi a tutti a Rossi che ok» → reply_all_email name Rossi body ok.\n\n"
     f"{SPOKEN_REPLY_RULE}"
 )
 
@@ -257,6 +284,13 @@ def dispatch_gmail_tool(tool: str, args: dict[str, Any]) -> str:
             body=args_dict.get("body", ""),
         )
 
+    if tool == _TOOL_REPLY_ALL:
+        # Stesso name integer di reply_email; un tool eseguito per enunciato.
+        return reply_all_email(
+            name=_as_name(args_dict.get("name")),
+            body=args_dict.get("body", ""),
+        )
+
     if tool == _TOOL_SEND:
         # Nessun argomento: la bozza e il flag HITL stanno nella sessione.
         return send_email()
@@ -287,7 +321,7 @@ def _normalize_hitl_utterance(text: str) -> str:
 
 
 def gmail_hitl_after_tool(tool: str, result: str) -> str | None:
-    """Dopo draft_email / reply_email OK: parla la conferma e salta Gemini."""
+    """Dopo draft_email / reply_email / reply_all_email OK: parla e salta Gemini."""
     if tool not in _HITL_DRAFT_TOOLS or not result.startswith("OK:"):
         return None
     # Togliamo il prefisso OK: dal TTS: l'utente sente solo la frase.
@@ -319,7 +353,7 @@ def gmail_hitl_on_utterance(text: str) -> str | None:
     if draft is None:
         # awaiting_confirm senza bozza non dovrebbe accadere; fallback parlante.
         return "Di' sì per inviare o no per annullare."
-    return spoken_draft_confirm(to=draft.to, subject=draft.subject, body=draft.body)
+    return spoken_draft_confirm(to=draft.to, subject=draft.subject, body=draft.body, cc=draft.cc)
 
 
 GMAIL_AGENT_SPEC = AgentSpec(

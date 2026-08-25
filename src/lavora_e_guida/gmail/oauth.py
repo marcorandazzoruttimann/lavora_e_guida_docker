@@ -56,6 +56,21 @@ MSG_MISSING_CLIENT = (
 )
 MSG_PROFILE_UNREACHABLE = "ERRORE: Gmail non raggiungibile, riprova più tardi"
 
+# Frasi TTS dopo `Gmail HTTP {code}`: niente JSON error Gmail nel parlato.
+# 401/403 restano MSG_GMAIL_NOT_LINKED (non passano da _spoken_http_status).
+# Condivise da profile OAuth, GET mailbox e POST send: un solo schema parlante.
+_HTTP_PHRASE_SEND_REJECTED = (
+    "Ha rifiutato l'invio, controlla i destinatari e riprova"
+)
+_HTTP_PHRASE_BUSY = "Gmail è occupata, riprova tra poco"
+# Stesso senso di MSG_PROFILE_UNREACHABLE, da attaccare al codice HTTP.
+_HTTP_PHRASE_UNREACHABLE = "Gmail non raggiungibile, riprova più tardi"
+_HTTP_PHRASE_SEND_FAILED = "Invio non riuscito, riprova più tardi"
+# GET / lettura / profile: 400 diverso dal send (non parla di destinatari).
+_HTTP_PHRASE_REQUEST_REJECTED = "Ha rifiutato la richiesta, riprova"
+# Altri >= 400 sulla GET (es. 409): stesso «riprova più tardi» senza dire invio.
+_HTTP_PHRASE_REQUEST_FAILED = "Richiesta non riuscita, riprova più tardi"
+
 
 class GmailAuthError(RuntimeError):
     """Auth Gmail fallita: token assente, refresh, scope o account sbagliato."""
@@ -211,6 +226,37 @@ def _mismatch_message(actual: str, expected: str) -> str:
     )
 
 
+def _spoken_http_status(code: int, kind: str) -> str:
+    """Assembla `ERRORE: Gmail HTTP {code}. {frase}` per il TTS.
+
+    Il numero resta nel parlato (ok in lab). `kind` distingue l'invio
+    (`send`) dalla GET (`get`): sul 400/422 il send parla di destinatari,
+    la lettura e il profile di una richiesta rifiutata. 401/403 non
+    arrivano qui: il chiamante parla MSG_GMAIL_NOT_LINKED. 404 in lettura
+    resta MSG_GONE (email sparita, niente codice). Side-effect: nessuno.
+    Mai il corpo JSON di Gmail nella stringa.
+    """
+    # Rate limit: stessa frase per send, get e profile; il codice parlato resta 429.
+    if code == 429:
+        phrase = _HTTP_PHRASE_BUSY
+    elif 500 <= code <= 599:
+        # 5xx: Gmail giù, stesso senso di MSG_PROFILE_UNREACHABLE col codice.
+        phrase = _HTTP_PHRASE_UNREACHABLE
+    elif kind == "send" and code in (400, 422):
+        # Payload/destinatari rifiutati: l'utente può ricontrollare gli @.
+        phrase = _HTTP_PHRASE_SEND_REJECTED
+    elif code == 400:
+        # GET mailbox o profile: rifiuto generico, non i destinatari.
+        phrase = _HTTP_PHRASE_REQUEST_REJECTED
+    elif kind == "send":
+        # Altri >= 400 sull'invio (es. 409, 418): codice + riprova più tardi.
+        phrase = _HTTP_PHRASE_SEND_FAILED
+    else:
+        # Fallback GET/profile: stessa idea del send, senza dire «invio».
+        phrase = _HTTP_PHRASE_REQUEST_FAILED
+    return f"ERRORE: Gmail HTTP {code}. {phrase}"
+
+
 def gmail_profile(
     creds: Credentials,
     *,
@@ -227,6 +273,9 @@ def gmail_profile(
 
     Se `expected_user` (o Settings.gmail_user) è valorizzato e non coincide,
     solleva GmailAuthError (account sbagliato al consenso).
+    HTTP >= 400 (non 401/403): stesso parlato della mailbox, codice più frase.
+    401/403 → MSG_GMAIL_NOT_LINKED. Rete o JSON rotto → MSG_PROFILE_UNREACHABLE
+    senza codice (non c'è uno status da leggere).
     """
     access_token = creds.token
     if not access_token:
@@ -249,7 +298,9 @@ def gmail_profile(
         if response.status_code in (401, 403):
             raise GmailAuthError(MSG_GMAIL_NOT_LINKED)
         if response.status_code >= 400:
-            raise GmailAuthError(f"ERRORE: profilo Gmail HTTP {response.status_code}")
+            # Stesso schema della GET mailbox: codice HTTP più frase italiana.
+            # Rete/JSON senza status restano MSG_PROFILE_UNREACHABLE (niente codice).
+            raise GmailAuthError(_spoken_http_status(response.status_code, "get"))
         try:
             payload = response.json()
         except json.JSONDecodeError as exc:

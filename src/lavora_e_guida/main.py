@@ -35,7 +35,7 @@ from lavora_e_guida.tools.fs import ensure_workspace
 # master = specialista FS (non un router).
 _MASTER_TOOLS_BANNER = "create_text_file,append_note,read_file,find_file"
 _GMAIL_TOOLS_BANNER = (
-    "list_emails,read_email,save_attachments,draft_email,reply_email,send_email"
+    "list_emails,read_email,save_attachments,draft_email,reply_email,reply_all_email,send_email"
 )
 
 # --llm ollama: extra di studio, non avvia il loop né il daemon.

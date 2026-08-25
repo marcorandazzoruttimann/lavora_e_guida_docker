@@ -147,7 +147,7 @@ def test_gmail_mode_skips_rag_and_uses_gmail_spec(
     err = capsys.readouterr().err
     assert "agent=gmail" in err
     assert "provider=gemini" in err
-    assert "tools=list_emails,read_email,save_attachments,draft_email,reply_email,send_email" in err
+    assert "tools=list_emails,read_email,save_attachments,draft_email,reply_email,reply_all_email,send_email" in err
     assert "find_file" not in err
     assert "RAG sync" not in err
 

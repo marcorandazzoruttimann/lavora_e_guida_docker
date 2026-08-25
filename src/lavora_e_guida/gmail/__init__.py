@@ -19,7 +19,7 @@ from lavora_e_guida.gmail.read import (
     read_email,
     save_attachments,
 )
-from lavora_e_guida.gmail.send import draft_email, reply_email, send_email
+from lavora_e_guida.gmail.send import draft_email, reply_all_email, reply_email, send_email
 
 __all__ = [
     "GMAIL_SCOPES",
@@ -33,6 +33,7 @@ __all__ = [
     "gmail_profile",
     "list_emails",
     "read_email",
+    "reply_all_email",
     "reply_email",
     "save_attachments",
     "send_email",

@@ -206,6 +206,64 @@ def test_gmail_profile_match_returns_address(tmp_path: Path) -> None:
     assert actual == "Tester@gmail.com"
 
 
+@pytest.mark.parametrize(
+    ("status", "phrase"),
+    [
+        (400, "Ha rifiutato la richiesta, riprova"),
+        (429, "Gmail è occupata, riprova tra poco"),
+        (500, "Gmail non raggiungibile, riprova più tardi"),
+        (503, "Gmail non raggiungibile, riprova più tardi"),
+        (409, "Richiesta non riuscita, riprova più tardi"),
+    ],
+)
+def test_gmail_profile_http_error_speaks_code_and_italian_phrase(
+    tmp_path: Path,
+    status: int,
+    phrase: str,
+) -> None:
+    """GET profile >= 400 (non 401/403): Gmail HTTP {code} più frase, niente JSON."""
+    creds = _make_creds()
+    # Messaggio Gmail nel JSON: il TTS deve ignorarlo, parla solo codice+frase.
+    gmail_json = {"error": {"code": status, "message": "Backend Error"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == GMAIL_PROFILE_URL
+        return httpx.Response(status, json=gmail_json)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(GmailAuthError) as excinfo:
+        gmail_profile(
+            creds,
+            expected_user=_USER,
+            settings=_settings(tmp_path),
+            client=client,
+        )
+    spoken = str(excinfo.value)
+    assert spoken == f"ERRORE: Gmail HTTP {status}. {phrase}"
+    assert "Backend Error" not in spoken
+    assert "profilo Gmail HTTP" not in spoken
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_gmail_profile_http_auth_error_stays_not_linked(
+    tmp_path: Path,
+    status: int,
+) -> None:
+    """401/403 sul profile: Gmail non collegata, niente Gmail HTTP {code}."""
+    creds = _make_creds()
+    client = _profile_client(_USER, status=status)
+    with pytest.raises(GmailAuthError) as excinfo:
+        gmail_profile(
+            creds,
+            expected_user=_USER,
+            settings=_settings(tmp_path),
+            client=client,
+        )
+    spoken = str(excinfo.value)
+    assert spoken == MSG_GMAIL_NOT_LINKED
+    assert f"Gmail HTTP {status}" not in spoken
+
+
 def test_bootstrap_mismatch_does_not_write_token(tmp_path: Path) -> None:
     """Account sbagliato: gmail_token.json non viene creato (token precedente intatto)."""
     settings = _settings(tmp_path)

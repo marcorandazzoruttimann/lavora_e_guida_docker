@@ -7,9 +7,11 @@ ultima lista, senza People API e senza far spellingare l'indirizzo a Gemini.
 `reply_email` è lo stesso gate HITL, ma sul thread: Gemini passa solo
 `name` e `body`; Python riempie destinatario (Reply-To o From), oggetto
 `Re:`, `threadId` e gli header RFC `In-Reply-To` / `References`.
-`send_email` chiama `users/me/messages/send` solo se la sessione ha una
-bozza e la conferma vocale è già avvenuta (interceptor sì/no nel loop).
-Mai un browser: token o scope insufficienti → GmailAuthError già parlante.
+`reply_all_email` è un tool distinto (niente flag `all` su reply): To+Cc
+della riga, senza `GMAIL_USER`. `send_email` chiama `users/me/messages/send`
+solo se la sessione ha una bozza e la conferma vocale è già avvenuta
+(interceptor sì/no nel loop). Mai un browser: token o scope insufficienti
+→ GmailAuthError già parlante.
 
 `gmail.modify` (marca-letto/archivio) è fuori scope: altro piano.
 """
@@ -23,12 +25,13 @@ from email.mime.text import MIMEText
 import httpx
 from google.oauth2.credentials import Credentials
 
-from lavora_e_guida.config import Settings
+from lavora_e_guida.config import Settings, get_settings
 from lavora_e_guida.gmail.oauth import (
     GMAIL_SCOPES,
     MSG_GMAIL_NOT_LINKED,
     MSG_PROFILE_UNREACHABLE,
     GmailAuthError,
+    _spoken_http_status,
     get_gmail_credentials,
 )
 from lavora_e_guida.gmail.read import (
@@ -53,6 +56,8 @@ MSG_EMPTY_BODY = "ERRORE: indica il testo dell'email"
 MSG_BAD_TO = "ERRORE: indirizzo destinatario non valido"
 # Riga in lista sì, ma From/Reply-To assenti o non parsabili: non inventiamo un @.
 MSG_NO_LISTED_ADDRESS = "ERRORE: nessun indirizzo nella email elencata"
+# Reply-all: dopo aver tolto me, To è vuoto (es. ero l'unico e il From non parsabile).
+MSG_NO_REPLY_ALL_RECIPIENTS = "ERRORE: nessun destinatario per rispondere a tutti"
 MSG_NO_DRAFT = "ERRORE: nessuna bozza da inviare, prepara prima l'email"
 MSG_NEED_CONFIRM = "ERRORE: conferma prima l'invio dicendo sì oppure no"
 
@@ -62,8 +67,10 @@ class EmailDraft:
     """Bozza in-process: i campi parlabili, niente MIME finché non si invia.
 
     I tre campi threading restano vuoti sul compose nuovo (`draft_email`).
-    Su `reply_email` Python li copia dalla riga in sessione: `threadId` Gmail
-    e Message-ID RFC, mai parlati in lista/lettura.
+    Su `reply_email` / `reply_all_email` Python li copia dalla riga in
+    sessione: `threadId` Gmail e Message-ID RFC, mai parlati in lista/lettura.
+    `cc` è pieno solo sul reply-all; compose e reply al mittente lo lasciano
+    vuoto così il MIME non mette l'header Cc.
     """
 
     to: str = ""
@@ -75,6 +82,8 @@ class EmailDraft:
     in_reply_to: str = ""
     # Header References: catena precedente più quel Message-ID.
     references: str = ""
+    # Header Cc: virgola-separati; vuoto = niente Cc sul MIME (compose/reply).
+    cc: str = ""
 
 
 @dataclass
@@ -99,11 +108,13 @@ class DraftSession:
         thread_id: str = "",
         in_reply_to: str = "",
         references: str = "",
+        cc: str = "",
     ) -> None:
         """Sostituisce la bozza e riapre l'attesa HITL (un enunciato = un draft).
 
-        Compose nuovo: i default azzerano il threading, anche se prima c'era
-        una reply in sessione. Reply: il chiamante passa threadId e RFC.
+        Compose nuovo: i default azzerano threading e Cc, anche se prima c'era
+        una reply-all in sessione. Reply al mittente: threadId/RFC, Cc vuoto.
+        Reply-all: il chiamante passa anche `cc` (già senza GMAIL_USER).
         """
         self.draft = EmailDraft(
             to=to,
@@ -112,6 +123,7 @@ class DraftSession:
             thread_id=thread_id,
             in_reply_to=in_reply_to,
             references=references,
+            cc=cc,
         )
         self.awaiting_confirm = True
         self.confirmed = False
@@ -142,18 +154,55 @@ def reset_draft_session() -> None:
     _DRAFT_SESSION.clear()
 
 
-def spoken_draft_confirm(*, to: str, subject: str, body: str) -> str:
-    """Frase TTS di conferma HITL: destinatario, oggetto, corpo, poi sì/no.
+def _split_header_addresses(raw: str) -> list[str]:
+    """Spezza To/Cc di sessione (già bare-@, virgola-separati) in lista stabile.
 
-    Un solo testo per `draft_email` / `reply_email` (con prefisso `OK:`) e
-    per il retry se l'utente non dice sì/no: così la seconda richiesta ha
-    ancora il corpo. Niente etichette `Oggetto:` né markdown: edge-tts
-    legge questa stringa (regola `SPOKEN_REPLY_RULE`). Side-effect: nessuno.
+    Non usa parseaddr: in bozza non c'è il display name, solo gli indirizzi
+    che Python ha già filtrato. Parti vuote (virgola doppia) si scartano.
     """
+    # Strip su ogni pezzo: lo join MIME mette ", " e HITL non deve leggere spazi.
+    return [part.strip() for part in (raw or "").split(",") if part.strip()]
+
+
+def _join_header_addresses(addresses: list[str]) -> str:
+    """To/Cc MIME e sessione: stesso ordine, virgola-spazio, niente display name."""
+    return ", ".join(addresses)
+
+
+def _spoken_recipient_clause(addresses: list[str]) -> str:
+    """Frasi ordinali dopo «un'email a»: un @, due con «e a», tre+ con virgole.
+
+    Niente etichette `A:` / `Cc:`: To e Cc si fondono in un'unica lista parlata.
+    Un solo destinatario (compose, reply, reply-all degenere) resta `addr`
+    così i test HITL a un @ non cambiano. Side-effect: nessuno.
+    """
+    if not addresses:
+        return ""
+    if len(addresses) == 1:
+        return addresses[0]
+    # Dal secondo in poi il TTS sente «a» davanti all'@, come nell'esempio del piano.
+    *rest, last = addresses
+    headed = [rest[0]] + [f"a {item}" for item in rest[1:]]
+    return f"{', '.join(headed)} e a {last}"
+
+
+def spoken_draft_confirm(*, to: str, subject: str, body: str, cc: str = "") -> str:
+    """Frase TTS di conferma HITL: destinatari, oggetto, corpo, poi sì/no.
+
+    Un solo testo per `draft_email` / `reply_email` / `reply_all_email`
+    (con prefisso `OK:`) e per il retry se l'utente non dice sì/no: così la
+    seconda richiesta ha ancora il corpo. Con più To o un Cc, gli `@` vanno
+    in frasi ordinali (regola `SPOKEN_REPLY_RULE`): niente markdown, niente
+    etichette `A:` / `Cc:`. L'`@` si sente solo qui, non nella reply Gemini.
+    Side-effect: nessuno.
+    """
+    # To poi Cc, stesso ordine del MIME: l'utente sente tutti prima del sì.
+    recipients = _split_header_addresses(to) + _split_header_addresses(cc)
+    spoken_to = _spoken_recipient_clause(recipients) or to
     # «oggetto {subject}» è una pausa in frase, non l'etichetta da elenco.
     # Il corpo va dopo «Il testo è:» così l'utente sente cosa sta per partire.
     return (
-        f"ho preparato un'email a {to}, oggetto {subject}. "
+        f"ho preparato un'email a {spoken_to}, oggetto {subject}. "
         f"Il testo è: {body}. "
         "Di' sì per inviare o no per annullare."
     )
@@ -273,16 +322,20 @@ def _rfc822_raw(
     from_addr: str,
     in_reply_to: str = "",
     references: str = "",
+    cc: str = "",
 ) -> str:
     """MIME testo UTF-8 → raw urlsafe-base64 (padding rimosso, contratto Gmail).
 
-    Compose nuovo: solo To/Subject/From. Reply: se i campi threading sono
-    pieni, aggiunge In-Reply-To e References (niente JSON qui: threadId
-    sta nel body REST, non nel MIME).
+    Compose nuovo: solo To/Subject/From. Reply al mittente: threading RFC.
+    Reply-all: anche header Cc se `cc` non è vuoto. threadId resta nel body
+    REST, non nel MIME.
     """
     # MIMEText imposta Content-Type text/plain; From è la mailbox autenticata.
     message = MIMEText(body, "plain", "utf-8")
     message["To"] = to
+    # Cc solo se Python ha lasciato qualcuno dopo aver tolto me e i To.
+    if cc.strip():
+        message["Cc"] = cc.strip()
     message["Subject"] = subject
     if from_addr:
         message["From"] = from_addr
@@ -340,6 +393,103 @@ def draft_email(
     return "OK: " + spoken_draft_confirm(to=dest, subject=subj, body=text)
 
 
+
+def _gmail_user_address(settings: Settings | None) -> str:
+    """Mailbox autenticata da Settings (test) o singleton env (runtime).
+
+    Serve al reply-all per togliere me da To/Cc (confronto casefold).
+    Vuoto = non filtriamo: in lab GMAIL_USER c'è quasi sempre.
+    """
+    # Iniezione nei test; nel loop vocale dispatch non passa settings.
+    cfg = settings if settings is not None else get_settings()
+    return (cfg.gmail_user or "").strip()
+
+
+def _is_self_address(address: str, me: str) -> bool:
+    """True se `address` è GMAIL_USER, ignorando maiuscole/spazi."""
+    # casefold: Tester@Gmail.com e tester@gmail.com sono la stessa mailbox.
+    return bool(me) and address.strip().casefold() == me.strip().casefold()
+
+
+def _unique_valid_addresses(
+    candidates: list[str],
+    *,
+    me: str,
+    exclude: set[str] | None = None,
+) -> list[str]:
+    """Dedup casefold, ordine stabile: niente me, niente già visti, solo @ validi.
+
+    `exclude` è un set di indirizzi già casefoldati (es. chi è già in To
+    non deve ricomparire in Cc). Side-effect: nessuno.
+    """
+    seen = set(exclude or ())
+    out: list[str] = []
+    for raw in candidates:
+        addr = (raw or "").strip()
+        if not addr or not _valid_to(addr):
+            continue
+        fold = addr.casefold()
+        # Me e i duplicati escono: l'ordine della prima occorrenza resta.
+        if _is_self_address(addr, me) or fold in seen:
+            continue
+        seen.add(fold)
+        out.append(addr)
+    return out
+
+
+def _reply_all_recipients(
+    item: MailboxItem, me: str
+) -> tuple[list[str], list[str]]:
+    """To e Cc del reply-all: mittente + To originali, poi Cc, senza me.
+
+    To = (Reply-To se valido, senno From) + To della riga, unici, senza me.
+    Cc = Cc della riga, senza me e senza chi è già in To. Ordine stabile.
+    """
+    # Stesso mittente del reply semplice: Reply-To vince sul From se parsabile.
+    sender = _recipient_from_listed_item(item)
+    to_candidates = ([sender] if sender else []) + list(item.to_addresses)
+    to_list = _unique_valid_addresses(to_candidates, me=me)
+    # Chi è già in To non va anche in Cc, nemmeno con casing diverso.
+    to_folds = {addr.casefold() for addr in to_list}
+    cc_list = _unique_valid_addresses(
+        list(item.cc_addresses),
+        me=me,
+        exclude=to_folds,
+    )
+    return to_list, cc_list
+
+
+def _store_threaded_draft(
+    store: DraftSession,
+    item: MailboxItem,
+    *,
+    to: str,
+    body: str,
+    cc: str = "",
+) -> str:
+    """Oggetto Re:, threadId, RFC e HITL. Side-effect: `store.set_draft`.
+
+    Condiviso da reply_email (cc vuoto) e reply_all_email (To+Cc). Ritorna
+    la stringa OK: con la frase parlata, Cc incluso se c'è.
+    """
+    subj = _reply_subject(item.subject)
+    in_reply_to = (item.rfc_message_id or "").strip()
+    references = _reply_references(
+        existing=item.rfc_references or "",
+        message_id=in_reply_to,
+    )
+    store.set_draft(
+        to,
+        subj,
+        body,
+        thread_id=(item.thread_id or "").strip(),
+        in_reply_to=in_reply_to,
+        references=references,
+        cc=cc,
+    )
+    return "OK: " + spoken_draft_confirm(to=to, subject=subj, body=body, cc=cc)
+
+
 def reply_email(
     name: object = "",
     body: object = "",
@@ -354,7 +504,7 @@ def reply_email(
     dall'oggetto originale (`Re:` se manca). Threading: threadId Gmail,
     In-Reply-To = Message-ID, References = catena esistente + quel id.
     Stesso HITL di `draft_email`. Side-effect: `session.set_draft`.
-    Reply-all (To+Cc) è un passo successivo, non questo tool.
+    Reply-all (To+Cc) è il tool `reply_all_email`, non un flag su questo.
     """
     spoken_name = _as_text(name)
     text = _as_text(body)
@@ -373,23 +523,58 @@ def reply_email(
     if not dest:
         # Riga sì, @ no: non inventiamo un dominio per chiudere il thread.
         return MSG_NO_LISTED_ADDRESS
-    subj = _reply_subject(item.subject)
-    in_reply_to = (item.rfc_message_id or "").strip()
-    references = _reply_references(
-        existing=item.rfc_references or "",
-        message_id=in_reply_to,
-    )
     store = session if session is not None else get_draft_session()
-    store.set_draft(
-        dest,
-        subj,
-        text,
-        thread_id=(item.thread_id or "").strip(),
-        in_reply_to=in_reply_to,
-        references=references,
+    # Cc resta vuoto: questo tool è solo mittente, reply-all è un altro nome.
+    return _store_threaded_draft(store, item, to=dest, body=text)
+
+
+
+def reply_all_email(
+    name: object = "",
+    body: object = "",
+    *,
+    session: DraftSession | None = None,
+    mailbox: MailboxSession | None = None,
+    settings: Settings | None = None,
+) -> str:
+    """Bozza in-reply a To+Cc della riga elencata, senza GMAIL_USER; niente REST.
+
+    Stesso `name` e `body` di `reply_email` (cognome, nome+cognome, indice).
+    Python riempie To = (Reply-To o From) + To originali senza me, Cc =
+    Cc originali senza me e senza chi è già in To. Se To resta vuoto,
+    errore parlante (niente bozza). Un solo @ restante è reply-all degenere:
+    si prepara comunque, HITL dice un solo indirizzo.
+    Side-effect: `session.set_draft` con threading come la reply al mittente.
+    """
+    spoken_name = _as_text(name)
+    text_body = _as_text(body)
+    if not spoken_name:
+        return MSG_EMPTY_NAME
+    if not text_body:
+        return MSG_EMPTY_BODY
+    # Stessa mailbox di list/read: senza elenco non c'è a chi rispondere.
+    box = mailbox if mailbox is not None else get_mailbox_session()
+    try:
+        # Stesso RapidFuzz di reply_email / read_email (WRatio, soglia 70).
+        item = resolve_listed_item(spoken_name, box)
+    except GmailReadError as exc:
+        return _spoken_error(exc)
+    me = _gmail_user_address(settings)
+    to_list, cc_list = _reply_all_recipients(item, me)
+    if not to_list:
+        # Ero l'unico in To e il From non è parsabile (o sono io): niente invio.
+        return MSG_NO_REPLY_ALL_RECIPIENTS
+    store = session if session is not None else get_draft_session()
+    to_header = _join_header_addresses(to_list)
+    cc_header = _join_header_addresses(cc_list)
+    # HITL elenca To e Cc in frasi ordinali; l'@ si sente solo qui.
+    return _store_threaded_draft(
+        store,
+        item,
+        to=to_header,
+        body=text_body,
+        cc=cc_header,
     )
-    # Stessa frase HITL del compose: l'@ lo sente l'utente una volta sola.
-    return "OK: " + spoken_draft_confirm(to=dest, subject=subj, body=text)
 
 
 def send_email(
@@ -432,6 +617,7 @@ def send_email(
             from_addr=sender,
             in_reply_to=draft.in_reply_to,
             references=draft.references,
+            cc=draft.cc,
         )
         # Compose nuovo: solo raw. Reply: Gmail raggruppa col threadId.
         payload: dict[str, str] = {"raw": raw}
@@ -454,9 +640,10 @@ def send_email(
             store.confirmed = False
             return MSG_GMAIL_NOT_LINKED
         if response.status_code >= 400:
+            # Bozza resta: l'utente può ritentare il sì dopo aver corretto.
             store.awaiting_confirm = True
             store.confirmed = False
-            return f"ERRORE: Gmail HTTP {response.status_code}"
+            return _spoken_http_status(response.status_code, "send")
         # 2xx: togliamo la bozza così un secondo «invia» non duplica.
         dest = draft.to
         subj = draft.subject
