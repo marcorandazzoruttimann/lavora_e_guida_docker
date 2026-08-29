@@ -9,9 +9,11 @@ emette una `functionCall web_search`, Python esegue la REST Tavily e rimanda
 l'esito come `functionResponse`, la sintesi parlata la scrive Gemini al turno
 successivo. Niente HITL: una ricerca è read-only, non c'è nulla da confermare.
 
-Vincolo vocale: la stringa che torna al modello cita le fonti come dominio
-(`corriere.it`); gli URL completi finiscono solo sullo stdout `[WEB]`, dove
-leggerli ha senso.
+Vincolo vocale: l'elenco che il modello riassume cita le fonti come dominio
+(`corriere.it`), perché a voce un indirizzo è illeggibile. Gli URL completi
+arrivano comunque nell'esito, in coda e sotto etichetta, e il prompt gli
+consente di darli solo quando l'utente li chiede espressamente; a schermo
+restano sempre, sullo stdout `[WEB]`, dove leggerli ha senso.
 """
 
 from __future__ import annotations
@@ -110,8 +112,13 @@ _SYSTEM_PROMPT = (
     "time_range. Ometti anche max_results, il valore di default va bene quasi "
     "sempre.\n"
     "Dopo il tool riassumi in italiano in poche frasi: prima la risposta, poi "
-    "le fonti. Cita la fonte col nome del sito, per esempio secondo ansa punto "
-    "it, e non leggere mai l'indirizzo completo di una pagina.\n"
+    "le fonti. Di norma cita la fonte col nome del sito, per esempio secondo "
+    "ansa punto it, e non leggere l'indirizzo completo di una pagina: a voce "
+    "sarebbe illeggibile.\n"
+    "Se invece l'utente chiede espressamente i link, gli indirizzi o le pagine, "
+    "sei autorizzato a darglieli. Usa soltanto gli indirizzi completi che "
+    "l'esito del tool elenca in fondo, dopo le fonti, e non inventarne mai uno: "
+    "se un risultato lì non ha indirizzo, dillo invece di ricostruirlo.\n"
     "Se il tool risponde ERRORE, di' all'utente cosa è andato storto e fermati: "
     "non inventare risultati né contenuti di pagine che non hai letto. Se il "
     "tool non trova nulla, dillo e proponi di riformulare la ricerca.\n"
@@ -160,15 +167,18 @@ def _print_web_tool_result(tool: str, result: str) -> None:
 
     A voce le fonti sono solo domini; a schermo servono invece gli indirizzi
     completi, per poter aprire la pagina. Li prendiamo da
-    `get_last_web_results`, cioè dallo stato dell'ultima ricerca riuscita, e
-    non dalla stringa mandata a Gemini, che gli URL non li contiene.
+    `get_last_web_results`, cioè dallo stato dell'ultima ricerca riuscita: uno
+    per riga si legge molto meglio dell'appendice in coda all'esito, che è
+    scritta per il modello e non per un terminale.
 
     Side-effect: print su stdout. Gli errori non si stampano: li dice già il TTS.
     """
     if tool != _TOOL_SEARCH or not result.startswith("OK:"):
         return
-    # Intestazione: la stessa riga di esito che ha visto il modello.
-    print(f"[WEB] {result}")
+    # Solo la parte parlata dell'esito: l'appendice `URL_SECTION_INTRO` sta dopo
+    # il primo `\n` e qui sarebbe un doppione dell'elenco stampato sotto.
+    spoken_part = result.split("\n", 1)[0]
+    print(f"[WEB] {spoken_part}")
     # Elenco numerato degli indirizzi, nello stesso ordine della frase parlata.
     for index, item in enumerate(get_last_web_results(), start=1):
         # Risultato senza URL (campo mancante nel payload): niente riga vuota.

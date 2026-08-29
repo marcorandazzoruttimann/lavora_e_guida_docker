@@ -5,9 +5,13 @@ con l'SDK ufficiale e si restituisce una stringa `OK:` / `ERRORE:` che rientra
 nel loop come `functionResponse`. La sintesi la fa Gemini: chiediamo a Tavily
 snippet grezzi (`include_answer=False`), non la sua risposta già confezionata.
 
-Vincolo vocale: la stringa di ritorno cita le fonti come **dominio**
+Vincolo vocale: l'elenco parlato cita le fonti come **dominio**
 (`corriere.it`), mai l'URL completo, perché `SPOKEN_REPLY_RULE` vieta di
-spellare indirizzi a voce. Gli URL interi restano nella lista in-process
+spellare indirizzi a voce. Gli indirizzi interi arrivano comunque al modello,
+ma in coda e sotto un'etichetta che ne limita l'uso (`URL_SECTION_INTRO`): il
+prompt gli permette di darli solo se l'utente li chiede espressamente. Senza
+questa appendice Gemini non avrebbe alcun URL vero e, se glieli chiedessimo,
+se li inventerebbe. Gli stessi indirizzi restano anche nella lista in-process
 (`get_last_web_results`), che l'agente stampa a schermo col prefisso `[WEB]`.
 
 Side-effect: una POST HTTPS verso api.tavily.com (costo in crediti) e la
@@ -56,9 +60,11 @@ SEARCH_DEPTH = "basic"
 # il materiale da far riassumere a Gemini in una frase.
 MAX_SNIPPET_CHARS = 400
 
-# Il default dell'SDK è 60 secondi: troppo per un loop vocale, l'utente crede
-# che l'assistente si sia piantato. Mezzo minuto è già oltre il tollerabile.
-SEARCH_TIMEOUT = 30.0
+# Un minuto, come il default dell'SDK. Mezzo minuto sembrava più adatto a un
+# loop vocale, ma è un timeout di orologio sulla socket: sotto debugger (o con
+# rete lenta) scadeva su ricerche che Tavily aveva già servito, e la richiesta
+# consumava comunque il credito. Meglio aspettare che pagare per niente.
+SEARCH_TIMEOUT = 60.0
 
 # Valori accettati da Tavily e replicati nella declaration dell'agente. Un
 # valore fuori lista non è un errore parlante: si omette e vale il default API.
@@ -85,6 +91,15 @@ _MARKUP_CHARS = ("**", "__", "*", "#", "`")
 
 # `www.` non si pronuncia: la fonte parlata è `corriere.it`, non `www.corriere.it`.
 _WWW_PREFIX = "www."
+
+# Etichetta dell'appendice con gli indirizzi interi. Non è testo da leggere: è
+# un'istruzione per Gemini, che senza questa riga tratterebbe gli URL come
+# materiale da riassumere a voce. Sta su una riga a parte (vedi lo `\n` in
+# `format_search_result`) così chi stampa a schermo può separarla in un colpo.
+URL_SECTION_INTRO = (
+    "Indirizzi completi delle fonti, nello stesso ordine: dalli all'utente solo "
+    "se li chiede espressamente, altrimenti cita soltanto il nome del sito."
+)
 
 
 class WebSearchError(ValueError):
@@ -274,14 +289,22 @@ def _results_from_payload(payload: Any) -> list[WebResult]:
 
 
 def format_search_result(query: str, results: list[WebResult]) -> str:
-    """Esito parlante numerato: fonti come dominio, mai un URL completo.
+    """Esito in due parti: elenco parlato (domini) più appendice con gli URL.
 
-    Con risultati: `OK: 3 risultati per meteo Roma. 1. Titolo, fonte ansa.it.
-    Snippet.` Lista vuota: formula dedicata, che non è un errore ma un esito.
+    Prima riga, quella che Gemini riassume a voce: `OK: 3 risultati per meteo
+    Roma. 1. Titolo, fonte ansa.it. Snippet.` — solo domini, nessun indirizzo
+    da spellare. Seconda riga, presente solo se almeno un risultato ha un URL:
+    `URL_SECTION_INTRO` più gli indirizzi numerati come sopra, così il modello
+    può darli quando l'utente li chiede senza doverseli inventare.
+
+    Lista vuota: formula dedicata, che non è un errore ma un esito legittimo.
     """
     if not results:
         return f"OK: nessun risultato trovato per {query}."
     pieces: list[str] = []
+    # Appendice: stessa numerazione dell'elenco parlato, così «il secondo link»
+    # dell'utente e «la seconda fonte» del riassunto indicano la stessa pagina.
+    links: list[str] = []
     for index, item in enumerate(results, start=1):
         # Titolo assente ma snippet sì: la riga vale ancora, senza frase vuota.
         head = item.title or "risultato senza titolo"
@@ -290,10 +313,19 @@ def format_search_result(query: str, results: list[WebResult]) -> str:
         # Punteggiatura già presente in coda: evitiamo il doppio punto.
         body = f" {item.snippet.rstrip(' .;,')}." if item.snippet else ""
         pieces.append(f"{index}. {head}{source}.{body}")
+        # Risultato senza indirizzo (campo mancante nel payload): si salta il
+        # numero nell'appendice invece di scrivere un «2. » senza link dietro.
+        if item.url:
+            links.append(f"{index}. {item.url}")
     count = len(results)
     # Singolare/plurale: «1 risultati» è la classica stonatura da TTS.
     noun = "risultato" if count == 1 else "risultati"
-    return f"OK: {count} {noun} per {query}. {' '.join(pieces)}"
+    spoken = f"OK: {count} {noun} per {query}. {' '.join(pieces)}"
+    # Nessun URL in tutta la risposta: niente appendice, l'esito resta una riga.
+    if not links:
+        return spoken
+    # `\n` come unico separatore: `split("\n", 1)` basta a chi vuole solo il parlato.
+    return f"{spoken}\n{URL_SECTION_INTRO} {' '.join(links)}"
 
 
 def _spoken_error(exc: BaseException) -> str:

@@ -58,17 +58,28 @@ Esempi vocali:
 - «che notizie ci sono oggi» → `topic=news`, `time_range=day`;
 - «novità sull’intelligenza artificiale questa settimana» → `topic=news`, `time_range=week`.
 
-### Fonti: dominio a voce, URL a schermo
+### Fonti: dominio a voce, URL su richiesta
 
-La stringa che torna a Gemini cita le fonti come **dominio** (`ansa.it`), mai l’indirizzo completo: `SPOKEN_REPLY_RULE` vieta di spellare URL a voce, e anche gli URL dentro i titoli e gli snippet vengono sostituiti dal loro dominio.
+L’esito del tool ha **due parti**, separate da un a capo.
 
-Gli indirizzi interi servono però a chi guarda lo schermo, per aprire la pagina: finiscono sullo stdout col prefisso `[WEB]`, numerati nello stesso ordine della frase parlata.
+La prima riga è quella che Gemini riassume a voce e cita le fonti come **dominio** (`ansa.it`), mai l’indirizzo completo: `SPOKEN_REPLY_RULE` vieta di spellare URL a voce, e anche i link che compaiono dentro titoli e snippet vengono sostituiti dal loro dominio.
+
+La seconda riga è un’appendice etichettata (`URL_SECTION_INTRO`) con gli indirizzi interi, numerati come l’elenco parlato. Serve solo a una cosa: se l’utente chiede espressamente i link, il modello deve avere quelli veri. Il system prompt lo autorizza a darli su richiesta e gli vieta di ricostruirli a memoria; senza l’appendice non avrebbe nessun URL in mano e li inventerebbe.
 
 ```
-[WEB] OK: 3 risultati per meteo Roma domani. 1. Previsioni Roma, fonte ilmeteo.it. ...
+OK: 2 risultati per meteo Roma. 1. Previsioni Roma, fonte ilmeteo.it. Domani sereno. 2. …
+Indirizzi completi delle fonti, nello stesso ordine: dalli all'utente solo se li chiede espressamente, … 1. https://www.ilmeteo.it/meteo/Roma 2. …
+```
+
+A schermo l’appendice non si ripete: lo stdout `[WEB]` stampa solo la riga parlata e sotto gli indirizzi uno per riga, che si leggono meglio.
+
+```
+[WEB] OK: 2 risultati per meteo Roma. 1. Previsioni Roma, fonte ilmeteo.it. Domani sereno. 2. …
   1. https://www.ilmeteo.it/meteo/Roma
   2. https://www.3bmeteo.com/meteo/roma
 ```
+
+Attenzione al canale: quando Gemini legge un indirizzo su richiesta, quel testo passa comunque da edge-tts. Con `AUDIO_DRIVER=mock` si legge a schermo ed è comodo; a voce un URL lungo resta faticoso da ascoltare, ed è il motivo per cui la deroga vale solo su richiesta esplicita.
 
 ### Esiti
 
@@ -95,7 +106,11 @@ Tavily fattura a **crediti**, uno per ricerca `basic` e due per una `advanced`. 
 - **niente** `auto_parameters`: sarebbe comodo, ma può promuovere da sé la ricerca ad `advanced` e raddoppiare il costo senza che si veda dal codice;
 - `include_raw_content=False`: le pagine intere gonfierebbero il contesto mandato a Gemini per produrre poi tre frasi parlate;
 - tetto di 8 risultati e snippet troncati a 400 caratteri, per lo stesso motivo;
-- timeout a 30 secondi invece dei 60 di default dell’SDK: in un loop vocale un minuto di silenzio sembra un blocco.
+- timeout a 60 secondi, come il default dell’SDK. Era stato abbassato a 30 perché in un loop vocale mezzo minuto di silenzio sembra già un blocco, ma è un timeout di orologio sulla socket: sotto debugger, o con rete lenta, scadeva su ricerche che Tavily aveva già servito. Il credito in quel caso è speso lo stesso — la richiesta era arrivata, siamo noi ad aver smesso di aspettare — e per giunta il messaggio di errore spingeva il modello a cercare di nuovo.
+
+Attenzione a una conseguenza del punto precedente: **una ricerca in errore costa comunque**, ma `[WEB]` stampa solo gli esiti `OK:`. Per contare i crediti davvero spesi vale la dashboard di app.tavily.com, non le righe a schermo.
+
+Nota su cosa il codice **non** limita: Gemini può chiamare `web_search` più volte nello stesso enunciato, raffinando la query dopo aver letto i primi risultati. Il loop glielo concede fino a `_MAX_TOOL_ROUNDS` (quattro giri), e la guardia anti-ripetizione di `run_chat_loop` blocca solo la stessa query ripetuta di fila. Un singolo enunciato può quindi costare più di un credito.
 
 Una query vuota viene fermata in Python **prima** della rete: query malposte non consumano crediti.
 

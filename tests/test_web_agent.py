@@ -7,10 +7,17 @@ modulo costruisce il `TavilyClient` vero. Stesso spirito del `client=`
 iniettabile dei tool Gmail: se un giorno qualcuno tolesse l'iniezione, questi
 test tenterebbero una richiesta reale e si vedrebbe subito.
 
-Cosa si sorveglia: il contratto parlato (`OK:` / `ERRORE:` in italiano, fonti
-come dominio e mai un URL da spellare a voce), la traduzione delle eccezioni
-dell'SDK in frasi TTS e i parametri effettivamente mandati a Tavily (profondità
-`basic` = un credito, `include_answer=False` perché la sintesi la fa Gemini).
+Cosa si sorveglia: il contratto parlato (`OK:` / `ERRORE:` in italiano, elenco
+con le fonti come dominio e mai un URL da spellare a voce), l'appendice con gli
+indirizzi interi che il modello può dare solo su richiesta esplicita, la
+traduzione delle eccezioni dell'SDK in frasi TTS e i parametri effettivamente
+mandati a Tavily (profondità `basic` = un credito, `include_answer=False`
+perché la sintesi la fa Gemini).
+
+Nota sulle asserzioni «niente URL»: valgono sulla **parte parlata** dell'esito,
+cioè la prima riga. Dalla seconda in poi c'è l'appendice `URL_SECTION_INTRO`,
+che gli indirizzi deve contenerli: senza, Gemini non avrebbe link veri da dare
+e li inventerebbe. `_spoken_part` isola la riga giusta in un punto solo.
 """
 
 from __future__ import annotations
@@ -60,6 +67,7 @@ from lavora_e_guida.web.search import (
     MSG_TIMEOUT,
     MSG_UNREACHABLE,
     SEARCH_DEPTH,
+    URL_SECTION_INTRO,
     WebSearchError,
     clamp_max_results,
     get_last_web_results,
@@ -103,6 +111,15 @@ def _row(title: str, url: str, content: str) -> dict[str, Any]:
 def _boom_client() -> Any:
     """Client vietato: se qualcuno lo chiama, il test stava per andare in rete."""
     raise AssertionError("get_tavily_client non deve partire in questo caso")
+
+
+def _spoken_part(result: str) -> str:
+    """Prima riga dell'esito: quella che Gemini riassume a voce, senza indirizzi.
+
+    L'appendice con gli URL vive dalla seconda riga in poi. Tenere lo split qui
+    evita che ogni test si ricordi da sé dov'è il confine.
+    """
+    return result.split("\n", 1)[0]
 
 
 # Riferimento alla fabbrica memoizzata vera, catturato all'import: la fixture
@@ -173,17 +190,73 @@ def test_web_search_formats_numbered_results_with_domains_only() -> None:
         }
     )
     result = web_search("meteo Roma", client=client)
+    spoken = _spoken_part(result)
 
-    assert result.startswith("OK: 2 risultati per meteo Roma.")
-    assert "1. Meteo Roma domani, fonte ansa.it. Domani sereno con massime di 30 gradi." in result
-    assert "2. Previsioni Lazio, fonte corriere.it. Nel weekend arriva la pioggia." in result
+    assert spoken.startswith("OK: 2 risultati per meteo Roma.")
+    assert "1. Meteo Roma domani, fonte ansa.it. Domani sereno con massime di 30 gradi." in spoken
+    assert "2. Previsioni Lazio, fonte corriere.it. Nel weekend arriva la pioggia." in spoken
     # Vincolo TTS: niente indirizzi da spellare, niente `www.` da pronunciare.
-    assert "https://" not in result
-    assert "www." not in result
-    assert "utm_source" not in result
+    assert "https://" not in spoken
+    assert "www." not in spoken
+    assert "utm_source" not in spoken
     # Niente markdown nell'esito: `SPOKEN_REPLY_RULE` vale anche per i tool.
-    assert "**" not in result
-    assert "- " not in result
+    assert "**" not in spoken
+    assert "- " not in spoken
+
+
+def test_web_search_appends_full_urls_for_the_model() -> None:
+    """Appendice con gli indirizzi interi: il modello li ha davvero, non li inventa.
+
+    È il pezzo che rende possibile «dammi i link»: senza, il prompt potrebbe
+    anche autorizzare Gemini a darli, ma lui non ne avrebbe nessuno in mano.
+    """
+    client = _FakeTavily(
+        {
+            "results": [
+                _row("Uno", "https://www.ansa.it/meteo/roma", "Sereno."),
+                _row("Due", "https://corriere.it/meteo/lazio", "Pioggia."),
+            ]
+        }
+    )
+    result = web_search("meteo Roma", client=client)
+
+    # Due righe: prima il parlato, poi l'appendice. Mai in ordine inverso.
+    spoken, appendix = result.split("\n", 1)
+    assert spoken.startswith("OK: 2 risultati per meteo Roma.")
+    # L'etichetta dice a Gemini quando può usarli: è un vincolo, non decorazione.
+    assert appendix.startswith(URL_SECTION_INTRO)
+    assert "se li chiede espressamente" in URL_SECTION_INTRO
+    # Indirizzi interi, con lo schema e il `www.` che a voce si tolgono.
+    assert "1. https://www.ansa.it/meteo/roma" in appendix
+    assert "2. https://corriere.it/meteo/lazio" in appendix
+    # Numerazione allineata all'elenco parlato: «il secondo link» = «la seconda fonte».
+    assert appendix.index("1. https://www.ansa.it") < appendix.index("2. https://corriere.it")
+
+
+def test_web_search_omits_url_section_when_no_result_has_one() -> None:
+    """Nessun indirizzo nel payload: nessuna appendice, l'esito resta una riga."""
+    client = _FakeTavily(
+        {"results": [{"title": "Senza fonte", "content": "Testo."}]}
+    )
+    result = web_search("x", client=client)
+    assert "\n" not in result
+    assert URL_SECTION_INTRO not in result
+
+
+def test_web_search_url_section_skips_results_without_address() -> None:
+    """Risultato senza URL: salta il suo numero, niente voce vuota in appendice."""
+    client = _FakeTavily(
+        {
+            "results": [
+                {"title": "Senza indirizzo", "content": "Testo."},
+                _row("Con indirizzo", "https://ansa.it/ok", "Altro testo."),
+            ]
+        }
+    )
+    _, appendix = web_search("x", client=client).split("\n", 1)
+    # Il numero è quello del risultato (il secondo), non un contatore a parte.
+    assert "2. https://ansa.it/ok" in appendix
+    assert "1. http" not in appendix
 
 
 def test_web_search_singular_noun_for_one_result() -> None:
@@ -293,14 +366,18 @@ def test_web_search_truncates_long_snippet_and_strips_markup() -> None:
         }
     )
     result = web_search("lorem", client=client)
+    spoken = _spoken_part(result)
 
     item = get_last_web_results()[0]
     # Tetto sullo snippet: il contesto mandato a Gemini resta piccolo.
     assert len(item.snippet) <= MAX_SNIPPET_CHARS
-    # Markdown e URL non sopravvivono al passaggio: la stringa è già parlabile.
-    assert "**" not in result
-    assert "https://" not in result
-    assert "Titolo in grassetto" in result
+    # Markdown e URL non sopravvivono al parlato: la riga è già pronunciabile.
+    assert "**" not in spoken
+    assert "https://" not in spoken
+    assert "Titolo in grassetto" in spoken
+    # L'URL citato dentro lo snippet resta un dominio anche in appendice: là
+    # sotto vanno solo gli indirizzi delle fonti, non i link interni alle pagine.
+    assert "https://ansa.it/altro" not in result
 
 
 def test_web_search_skips_rows_without_title_and_snippet() -> None:
@@ -430,6 +507,10 @@ def test_print_web_tool_result_shows_full_urls_on_stdout(
     assert "1. https://www.ansa.it/meteo/roma" in out
     # Un solo indirizzo stampato: il risultato senza URL non produce «2. ».
     assert "2. http" not in out
+    # L'appendice per il modello non finisce a schermo: qui l'elenco numerato
+    # sotto è già più leggibile, e stamparli entrambi sarebbe un doppione.
+    assert URL_SECTION_INTRO not in out
+    assert out.count("https://www.ansa.it/meteo/roma") == 1
 
 
 def test_print_web_tool_result_stays_silent_on_error(
@@ -471,9 +552,13 @@ def test_web_loop_spec_has_no_hitl_and_speaks_intro() -> None:
     # Contratto nativo: gli schemi stanno nelle declaration, non come JSON nel prompt.
     assert '{"tool": "web_search"' not in prompt
     assert "web_search" in prompt
-    # Regole non negoziabili: un tool per enunciato e mai leggere l'indirizzo.
+    # Regole non negoziabili: un tool per enunciato e, di default, niente indirizzi.
     assert "Un solo tool per enunciato" in prompt
-    assert "non leggere mai l'indirizzo" in prompt
+    assert "non leggere l'indirizzo completo" in prompt
+    # Deroga esplicita: su richiesta dell'utente i link si possono dare, ma solo
+    # quelli che il tool ha davvero elencato. Le due frasi devono restare insieme.
+    assert "sei autorizzato a darglieli" in prompt
+    assert "non inventarne mai uno" in prompt
     # Isolamento: il prompt web non conosce i tool FS né la mailbox.
     assert "create_text_file" not in prompt
     assert "list_emails" not in prompt
