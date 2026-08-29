@@ -16,7 +16,13 @@ lavora-e-guida
 # Digita una frase (crea/aggiorna/leggi/cerca file), poi `esci`.
 ```
 
-Equivalente: `python -m lavora_e_guida`. Gmail: `lavora-e-guida --agent gmail`.
+Equivalente: `python -m lavora_e_guida`.
+
+| Agente | Comando | Cosa fa |
+| --- | --- | --- |
+| master (default) | `lavora-e-guida` | File e RAG sul Desktop: crea, aggiorna, legge, cerca |
+| gmail | `lavora-e-guida --agent gmail` | Mailbox: lettura, allegati, invio con conferma vocale |
+| web | `lavora-e-guida --agent web` | Ricerca online via Tavily, riassunto parlato con le fonti |
 
 `--llm ollama` sul loop vocale non avvia il 3B: messaggio parlato e uscita.
 
@@ -30,6 +36,8 @@ Equivalente: `python -m lavora_e_guida`. Gmail: `lavora-e-guida --agent gmail`.
 Dettagli Ollama (studio, daemon, variabili): [docs/ollama.md](docs/ollama.md).
 
 Connessione Gmail (OAuth Desktop a tavolino, non nel loop vocale): [docs/gmail_oauth.md](docs/gmail_oauth.md).
+
+Ricerca web (chiave Tavily, tool `web_search`, costo in crediti): [docs/tavily_web.md](docs/tavily_web.md).
 
 ## Test
 

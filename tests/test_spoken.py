@@ -11,12 +11,14 @@ from lavora_e_guida.gmail.agent import GMAIL_LOOP_SPEC
 from lavora_e_guida.llm.spoken import SPOKEN_REPLY_RULE, prepare_spoken_text
 from lavora_e_guida.llm.turn import LlmTurn
 from lavora_e_guida.llm.usage import TokenUsage
+from lavora_e_guida.web.agent import WEB_LOOP_SPEC
 
 
 def test_spoken_reply_rule_is_in_every_loop_spec() -> None:
-    """FS e Gmail condividono lo stesso vincolo TTS: niente drift tra specialisti."""
+    """FS, Gmail e web condividono lo stesso vincolo TTS: niente drift tra specialisti."""
     assert SPOKEN_REPLY_RULE in MASTER_LOOP_SPEC.system_prompt
     assert SPOKEN_REPLY_RULE in GMAIL_LOOP_SPEC.system_prompt
+    assert SPOKEN_REPLY_RULE in WEB_LOOP_SPEC.system_prompt
 
 
 def test_prepare_spoken_text_strips_markdown_email_list() -> None:

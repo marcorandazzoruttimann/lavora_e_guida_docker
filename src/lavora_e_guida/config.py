@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     # Cloud: `--llm gemini` (override CLI `--model` o env GEMINI_MODEL).
     gemini_model: str = "gemini-3.5-flash"
+    # Ricerca web (`--agent web`): chiave `tvly-…` di app.tavily.com.
+    # Come GEMINI_API_KEY resta opzionale nel modello: il fail-fast è nella CLI,
+    # così importare Settings non esplode per gli altri agenti che non cercano sul web.
+    tavily_api_key: str | None = None
 
     # File utente (note, PDF, create/read/append) sul Desktop Windows montato in WSL.
     # Path traversal oltre questo root è rifiutato dagli tool FS.

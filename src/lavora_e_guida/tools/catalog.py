@@ -69,6 +69,31 @@ def boolean_param(description: str) -> dict[str, Any]:
     return {"type": "boolean", "description": description}
 
 
+def enum_param(description: str, values: Sequence[str]) -> dict[str, Any]:
+    """Proprietà stringa vincolata a un insieme chiuso di valori.
+
+    Serve ai parametri "a scelta fissa" dei tool vocali (per esempio `topic`
+    con `general`/`news`, oppure `time_range` con `day`/`week`/…). Dichiarare
+    l'insieme nello schema è meglio che accettare stringa libera e validarla
+    solo in Python: Gemini vede i valori ammessi e smette di inventarne.
+
+    Il tipo resta `string` perché lo schema OpenAPI ristretto accettato da
+    Gemini non ha un tipo `enum` a sé: `enum` è un vincolo sul valore.
+    Contratto: `values` non vuota; nessun side-effect, torna solo un dict nuovo.
+    """
+    # Fail-fast in fase di import del catalogo: un enum vuoto sarebbe uno
+    # schema insensato che Gemini scoprirebbe solo a runtime, in chiamata.
+    if not values:
+        raise ValueError("enum_param richiede almeno un valore ammesso")
+    # `list(values)` copia la sequenza in ingresso: la declaration è condivisa
+    # e non deve restare agganciata a una lista che il chiamante può mutare.
+    return {
+        "type": "string",
+        "description": description,
+        "enum": list(values),
+    }
+
+
 def to_gemini_tools(
     declarations: Sequence[ToolDeclaration],
 ) -> list[dict[str, Any]]:

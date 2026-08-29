@@ -1,7 +1,8 @@
 """Entrypoint vocale: Mock/HTTP STT/TTS + Gemini (function calling) + agente.
 
 Avvio: `lavora-e-guida` oppure `python -m lavora_e_guida`.
-Agente: `--agent master|gmail` (master = specialista FS/RAG).
+Agente: `--agent master|gmail|web` (master = specialista FS/RAG, gmail =
+mailbox con conferma, web = ricerca online via Tavily).
 Switch LLM: `--llm gemini|ollama` (default gemini). `--llm ollama` è fail-fast
 parlante: il 3B non avvia il loop.
 Audio: `AUDIO_DRIVER=mock|http` da Settings (factory, non Mock hardcoded).
@@ -30,12 +31,24 @@ from lavora_e_guida.gmail.oauth import GmailAuthError, get_gmail_credentials
 from lavora_e_guida.llm.cloud import GeminiChat
 from lavora_e_guida.rag.index_sync import sync_workspace_index
 from lavora_e_guida.tools.fs import ensure_workspace
+from lavora_e_guida.web.agent import WEB_LOOP_SPEC
+
+# Alias del tipo agente: una sola fonte per `--agent`, banner e firma interne.
+AgentName = Literal["master", "gmail", "web"]
 
 # Nomi tool nel banner: allineati allo spec, così a occhio si vede cosa parla.
 # master = specialista FS (non un router).
 _MASTER_TOOLS_BANNER = "create_text_file,append_note,read_file,find_file"
 _GMAIL_TOOLS_BANNER = (
     "list_emails,read_email,save_attachments,draft_email,reply_email,reply_all_email,send_email"
+)
+# Web: un tool solo, ma nel banner ci sta comunque (log uniformi tra agenti).
+_WEB_TOOLS_BANNER = "web_search"
+
+# Fail-fast Tavily: stderr per lo sviluppatore, non testo TTS (il loop non parte).
+MSG_MISSING_TAVILY_KEY = (
+    "TAVILY_API_KEY assente. Prendi una chiave su app.tavily.com, mettila nel "
+    ".env (TAVILY_API_KEY=tvly-...) e riprova."
 )
 
 # --llm ollama: extra di studio, non avvia il loop né il daemon.
@@ -50,16 +63,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="lavora-e-guida",
         description=(
-            "Assistente vocale: specialista FS/RAG sul Desktop (`master`) "
-            "oppure Gmail (lettura e invio con conferma)."
+            "Assistente vocale: specialista FS/RAG sul Desktop (`master`), "
+            "Gmail (lettura e invio con conferma) oppure ricerca web (`web`)."
         ),
     )
     # Default master: specialista FS; il router-only è un piano successivo.
     parser.add_argument(
         "--agent",
-        choices=("master", "gmail"),
+        choices=("master", "gmail", "web"),
         default="master",
-        help="Agente vocale: master (FS/RAG) o gmail. Default: master.",
+        help="Agente vocale: master (FS/RAG), gmail o web. Default: master.",
     )
     # Ollama resta nel parser per il fail-fast parlante, non per avviare Qwen.
     parser.add_argument(
@@ -150,15 +163,29 @@ def _require_gmail_token(settings: Settings) -> None:
         raise SystemExit(1) from None
 
 
+def _require_tavily_key(settings: Settings) -> None:
+    """Fail-fast: senza `TAVILY_API_KEY` il loop web non parte. SystemExit(1).
+
+    Stesso spirito di `_startup_gemini`: meglio un messaggio chiaro all'avvio che
+    scoprire la chiave mancante al primo `web_search`, quando l'utente ha già
+    parlato. Qui non si fa nessuna chiamata di rete: Tavily non ha un endpoint di
+    ping gratuito, e un ping a pagamento brucerebbe un credito a ogni avvio.
+    """
+    # `or ""` + strip: nel `.env` la riga può esserci ma vuota (`TAVILY_API_KEY=`).
+    if not (settings.tavily_api_key or "").strip():
+        print(MSG_MISSING_TAVILY_KEY, file=sys.stderr)
+        raise SystemExit(1)
+
+
 def _print_startup_banner(
     *,
-    agent: Literal["master", "gmail"],
+    agent: AgentName,
     provider: str,
     model: str,
     audio_driver: str,
     workspace_root: Path | None,
 ) -> None:
-    """Stderr di avvio: master invariato; gmail senza data/index FS."""
+    """Stderr di avvio: master invariato; gmail e web senza data/index FS."""
     # Master: stesso testo di prima così i log e gli script a occhio non cambiano.
     if agent == "master":
         print(
@@ -169,22 +196,24 @@ def _print_startup_banner(
             file=sys.stderr,
         )
         return
-    # Gmail: niente workspace Desktop; i tool parlanti includono bozza/invio.
+    # Specialisti senza FS: niente workspace Desktop né indice RAG nella riga.
+    # Gmail elenca bozza/invio, web il solo `web_search`.
+    tools = _GMAIL_TOOLS_BANNER if agent == "gmail" else _WEB_TOOLS_BANNER
     print(
-        f"[lab] agent=gmail provider={provider} modello={model} "
+        f"[lab] agent={agent} provider={provider} modello={model} "
         f"audio={audio_driver} "
-        f"tools={_GMAIL_TOOLS_BANNER}",
+        f"tools={tools}",
         file=sys.stderr,
     )
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Parse CLI, ping Gemini, prepara master o Gmail, loop fino a 'esci'."""
-    # .env in cwd/repo: GEMINI_API_KEY / GMAIL_* senza export manuale in shell.
+    """Parse CLI, ping Gemini, prepara master/Gmail/web, loop fino a 'esci'."""
+    # .env in cwd/repo: GEMINI_API_KEY / GMAIL_* / TAVILY_API_KEY senza export.
     load_dotenv()
 
     args = _parse_args(argv)
-    agent: Literal["master", "gmail"] = args.agent
+    agent: AgentName = args.agent
     # Settings dopo dotenv: AUDIO_DRIVER, URL bridge e path token già risolti.
     settings = get_settings()
 
@@ -218,6 +247,10 @@ def main(argv: list[str] | None = None) -> None:
             # Niente ensure_workspace né sync RAG: solo gate sul token a disco.
             _require_gmail_token(settings)
             loop_spec = GMAIL_LOOP_SPEC
+        elif agent == "web":
+            # Come Gmail: nessun file utente, nessun indice, solo la chiave API.
+            _require_tavily_key(settings)
+            loop_spec = WEB_LOOP_SPEC
         else:
             workspace_root = _prepare_master_workspace()
 

@@ -19,6 +19,7 @@ dependencies = [
     "chromadb>=0.5",
     "google-auth>=2",
     "google-auth-oauthlib>=1",
+    "tavily-python>=0.8",
 ]
 
 [project.optional-dependencies]
