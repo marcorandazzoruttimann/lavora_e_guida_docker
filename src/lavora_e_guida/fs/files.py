@@ -1,8 +1,13 @@
-"""Tool filesystem del lab: solo sotto WORKSPACE_ROOT (Desktop Ollama_test).
+"""Tool filesystem dello specialista FS: solo sotto WORKSPACE_ROOT (Desktop).
 
-Step 2: `create_text_file` (default `.txt` se manca l'estensione);
-Step 3: `append_note` — resolve RapidFuzz, create-on-miss sotto notes/;
-Step 4/6: `read_file` — resolve unificato (testo + PDF), dispatch pypdf se `.pdf`.
+Stessa forma di `gmail/read.py` e `web/search.py`: l'implementazione di dominio
+vive nel pacchetto specialista, non in `tools/` (lì resta solo il catalogo
+condiviso). Gemini chiama `create_text_file` / `append_note` / `read_file`;
+questo modulo esegue l'I/O e torna `OK:` / `ERRORE:` parlanti.
+
+`create_text_file`: default `.txt` se manca l'estensione.
+`append_note`: resolve RapidFuzz, create-on-miss sotto notes/.
+`read_file`: resolve unificato (testo + PDF), dispatch pypdf se `.pdf`.
 Ogni path utente è risolto e verificato: fuori dal root → errore parlante, niente I/O.
 """
 
@@ -13,7 +18,7 @@ import re
 from pathlib import Path
 
 from lavora_e_guida.config import INDEX_ROOT, WORKSPACE_ROOT
-from lavora_e_guida.tools.file_resolver import resolve_file_path
+from lavora_e_guida.fs.file_resolver import resolve_file_path  # RapidFuzz, niente LLM
 
 logger = logging.getLogger(__name__)
 

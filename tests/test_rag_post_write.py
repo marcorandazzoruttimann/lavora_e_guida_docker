@@ -8,24 +8,24 @@ import pytest
 
 pytest.importorskip("chromadb")
 
+from lavora_e_guida.fs.files import append_note, create_text_file
 from lavora_e_guida.rag.index_db import IndexDB
-from lavora_e_guida.tools.fs import append_note, create_text_file
 
 
 @pytest.fixture
 def workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Reindirizza WORKSPACE_ROOT e INDEX_ROOT al tmp_path per i test FS."""
-    import lavora_e_guida.tools.fs as tools_fs
+    import lavora_e_guida.fs.files as fs_files
 
     # Data workspace: dove i tool creano i file.
     data_ws = tmp_path / "data"
     data_ws.mkdir()
-    monkeypatch.setattr(tools_fs, "WORKSPACE_ROOT", data_ws)
+    monkeypatch.setattr(fs_files, "WORKSPACE_ROOT", data_ws)
 
     # Indice RAG: separato dal data workspace, come in produzione.
     index_root = tmp_path / "index"
     index_root.mkdir()
-    monkeypatch.setattr(tools_fs, "INDEX_ROOT", index_root)
+    monkeypatch.setattr(fs_files, "INDEX_ROOT", index_root)
 
     (data_ws / "notes").mkdir()
     (data_ws / "inbox").mkdir()

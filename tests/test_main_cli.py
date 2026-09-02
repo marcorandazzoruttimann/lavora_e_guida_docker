@@ -1,4 +1,4 @@
-"""CLI `--agent`: master invariato, gmail e web skip RAG e fail-fast sulle chiavi."""
+"""CLI `--agent`: default router, fs = vecchio master, gmail/web skip RAG."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ import pytest
 
 from lavora_e_guida import main as main_mod
 from lavora_e_guida.config import Settings
+from lavora_e_guida.fs.agent import FS_LOOP_SPEC
 from lavora_e_guida.gmail.agent import GMAIL_LOOP_SPEC
 from lavora_e_guida.gmail.oauth import MSG_GMAIL_NOT_LINKED
 from lavora_e_guida.llm.cloud import GeminiChat
+from lavora_e_guida.master.agent import MASTER_LOOP_SPEC
 from lavora_e_guida.rag.index_sync import SyncStats
 from lavora_e_guida.web.agent import WEB_LOOP_SPEC
 
@@ -58,9 +60,16 @@ def _stub_process(
 
 
 def test_parse_args_agent_default_is_master() -> None:
-    """Senza flag: master + gemini (prodotto). Ollama solo se --llm ollama."""
+    """Senza flag: master (router) + gemini (prodotto). Ollama solo se --llm ollama."""
     args = main_mod._parse_args([])
     assert args.agent == "master"
+    assert args.llm == "gemini"
+
+
+def test_parse_args_agent_fs_is_accepted() -> None:
+    """`--agent fs` è nelle choices: specialista Desktop, non più il default."""
+    args = main_mod._parse_args(["--agent", "fs"])
+    assert args.agent == "fs"
     assert args.llm == "gemini"
 
 
@@ -86,7 +95,7 @@ def test_parse_args_agent_web_defaults_to_gemini() -> None:
 
 
 def test_parse_args_rejects_unknown_agent() -> None:
-    """choices argparse: niente handoff/crewai, solo master|gmail|web."""
+    """choices argparse: niente handoff/crewai, solo master|fs|gmail|web."""
     with pytest.raises(SystemExit) as exc_info:
         main_mod._parse_args(["--agent", "crewai"])
     assert exc_info.value.code == 2
@@ -256,12 +265,64 @@ def test_web_mode_skips_rag_and_uses_web_spec(
     assert "tvly-fake-key" not in err
 
 
-def test_master_mode_still_prepares_workspace_and_default_spec(
+def test_master_mode_prepares_workspace_and_uses_router_spec(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Default master: workspace + RAG, loop senza spec Gmail, banner FS."""
+    """Default master: workspace + RAG, MASTER_LOOP_SPEC, banner ask_*, niente gate Gmail/Tavily."""
+    # tavily_api_key assente di proposito: il router non deve fare fail-fast.
+    _stub_process(monkeypatch, tmp_path, tavily_api_key=None)
+    data_ws = tmp_path / "desktop"
+    monkeypatch.setattr(main_mod, "ensure_workspace", lambda: data_ws)
+    monkeypatch.setattr(
+        main_mod,
+        "sync_workspace_index",
+        lambda *_a, **_k: SyncStats(),
+    )
+    # Gate Gmail lazy nel dispatch, non all'avvio: se la CLI chiama il token, boom.
+    monkeypatch.setattr(
+        main_mod,
+        "get_gmail_credentials",
+        lambda **_k: (_ for _ in ()).throw(AssertionError("token Gmail")),
+    )
+
+    captured: dict[str, Any] = {}
+
+    def fake_loop(*_args: object, spec: object = None, **_kwargs: object) -> int:
+        captured["spec"] = spec
+        return 0
+
+    monkeypatch.setattr(main_mod, "run_chat_loop", fake_loop)
+    monkeypatch.setattr(
+        main_mod,
+        "create_audio_pair",
+        lambda _settings: (MagicMock(), MagicMock()),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.main([])
+    assert exc_info.value.code == 0
+    assert captured["spec"] is MASTER_LOOP_SPEC
+    err = capsys.readouterr().err
+    assert "agent=gmail" not in err
+    assert "agent=fs" not in err
+    assert "tools=ask_fs,ask_gmail,ask_web" in err
+    assert f"data={data_ws}" in err
+    assert "index=" in err
+    assert "create_text_file" not in err
+    assert "web_search" not in err
+    assert "provider=gemini" in err
+    assert "RAG sync" in err
+    assert main_mod.MSG_MISSING_TAVILY_KEY not in err
+
+
+def test_fs_mode_prepares_workspace_and_uses_fs_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--agent fs`: come il vecchio master, FS_LOOP_SPEC e banner create/append/read/find."""
     _stub_process(monkeypatch, tmp_path)
     data_ws = tmp_path / "desktop"
     monkeypatch.setattr(main_mod, "ensure_workspace", lambda: data_ws)
@@ -290,12 +351,16 @@ def test_master_mode_still_prepares_workspace_and_default_spec(
     )
 
     with pytest.raises(SystemExit) as exc_info:
-        main_mod.main([])
+        main_mod.main(["--agent", "fs"])
     assert exc_info.value.code == 0
-    assert captured["spec"] is None
+    assert captured["spec"] is FS_LOOP_SPEC
     err = capsys.readouterr().err
-    assert "agent=gmail" not in err
+    assert "agent=fs" in err
     assert "tools=create_text_file,append_note,read_file,find_file" in err
+    assert f"data={data_ws}" in err
+    assert "index=" in err
+    assert "ask_fs" not in err
+    assert "agent=gmail" not in err
     assert "provider=gemini" in err
     assert "RAG sync" in err
 

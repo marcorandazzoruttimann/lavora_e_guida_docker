@@ -1742,7 +1742,7 @@ class _ScriptedLLM:
         **kwargs: object,
     ) -> LlmTurn:
         self.calls += 1
-        # Primo round: lo spec Gmail, non il master FS, deve stare in testa.
+        # Primo round: lo spec Gmail, non lo specialista FS, deve stare in testa.
         if self.calls == 1:
             system = messages[0]["content"]
             assert system == GMAIL_LOOP_SPEC.system_prompt
@@ -1784,7 +1784,7 @@ def test_gmail_loop_list_emails_then_none(
     )
     assert code == 0
     spoken = outfile.getvalue()
-    # Intro specialista + sintesi none; il master FS non deve comparire.
+    # Intro specialista + sintesi none; lo specialista FS non deve comparire.
     assert "Agente Gmail: posso elencare" in spoken
     assert "Assistente file sul Desktop" not in spoken
     assert "Hai due email: da Mario, fattura, e da Anna, riunione." in spoken

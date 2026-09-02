@@ -9,8 +9,8 @@ import pytest
 pytest.importorskip("chromadb")
 
 from lavora_e_guida.config import EMAIL_ATTACHMENTS_DIRNAME
+from lavora_e_guida.fs.find import FindToolError, find_file
 from lavora_e_guida.rag.index_sync import sync_workspace_index
-from lavora_e_guida.tools.find import FindToolError, find_file
 
 
 def _seed_two_notes(data_ws: Path, index_root: Path) -> None:

@@ -1,11 +1,19 @@
 """Spec vocale Gmail: lettura, allegati, bozza, reply al thread e invio HITL.
 
-Questo modulo è lo specialista email. Importa da `lavora_e_guida.agent` solo
-`LoopSpec` / `AgentSpec` (contratto del loop), mai i tool FS/RAG del master.
-Il master non importa questo file: niente list/read/save/draft/reply/send sul FS.
+Questo modulo è lo specialista email, uno dei quattro agenti vocali
+(`master` router, `fs` Desktop, `gmail` qui, `web` Tavily). Importa da
+`lavora_e_guida.agent` solo `LoopSpec` / `AgentSpec` (contratto del loop),
+mai i tool FS/RAG. Lo specialista FS (`--agent fs`) non importa questo file:
+niente list/read/save/draft/reply/send sul Desktop.
+
+Due modi di girare: `--agent gmail` (loop isolato, fail-fast sul token) oppure
+nested dal router (`ask_gmail`, stessa storia isolata, niente TTS nested).
+Flusso composto dal master: ricerca + email → prima `ask_web`, poi `ask_gmail`
+con destinatario e testo; HITL sì/no resta sul loop esterno.
 
 I tool sono `functionDeclarations` Gemini. L'invio passa da `draft_email` o
-`reply_email` / `reply_all_email` e da un sì vocale in Python: Gemini non può saltare la conferma.
+`reply_email` / `reply_all_email` e da un sì vocale in Python: Gemini non può
+saltare la conferma.
 """
 
 from __future__ import annotations
@@ -48,7 +56,7 @@ _TOOL_SEND = "send_email"
 # draft e reply condividono lo stesso interceptor sì/no del loop.
 _HITL_DRAFT_TOOLS = frozenset({_TOOL_DRAFT, _TOOL_REPLY, _TOOL_REPLY_ALL})
 
-# Catalogo Gmail isolato: il master FS non importa questo modulo.
+# Catalogo Gmail isolato: lo specialista FS non importa questo modulo.
 GMAIL_TOOL_DECLARATIONS: tuple[ToolDeclaration, ...] = (
     ToolDeclaration(
         name=_TOOL_LIST,
@@ -190,7 +198,7 @@ _GMAIL_INTRO_TEXT = (
 )
 
 # Prompt: identità e regole. Gli schemi stanno nelle declaration.
-# Stesso vincolo TTS del master FS: elenchi email in frasi, non markdown.
+# Stesso vincolo TTS dello specialista FS: elenchi email in frasi, non markdown.
 _SYSTEM_PROMPT = (
     "Sei l'assistente vocale Gmail. Usa i tool per elencare, leggere, "
     "salvare allegati, preparare email e rispondere ai thread. "
@@ -365,7 +373,7 @@ GMAIL_AGENT_SPEC = AgentSpec(
     intro_text=_GMAIL_INTRO_TEXT,
     backstory=(
         "Specialista mailbox. Non tocca i file del Desktop: quelli sono dello "
-        "specialista FS (`--agent master`)."
+        "specialista FS (`--agent fs`)."
     ),
 )
 

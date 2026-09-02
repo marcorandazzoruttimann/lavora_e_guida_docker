@@ -5,20 +5,23 @@ from __future__ import annotations
 from io import StringIO
 from pathlib import Path
 
-from lavora_e_guida.agent import MASTER_LOOP_SPEC, run_chat_loop
+from lavora_e_guida.agent import run_chat_loop
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
+from lavora_e_guida.fs.agent import FS_LOOP_SPEC
 from lavora_e_guida.gmail.agent import GMAIL_LOOP_SPEC
 from lavora_e_guida.llm.spoken import SPOKEN_REPLY_RULE, prepare_spoken_text
 from lavora_e_guida.llm.turn import LlmTurn
 from lavora_e_guida.llm.usage import TokenUsage
+from lavora_e_guida.master.agent import MASTER_LOOP_SPEC
 from lavora_e_guida.web.agent import WEB_LOOP_SPEC
 
 
 def test_spoken_reply_rule_is_in_every_loop_spec() -> None:
-    """FS, Gmail e web condividono lo stesso vincolo TTS: niente drift tra specialisti."""
-    assert SPOKEN_REPLY_RULE in MASTER_LOOP_SPEC.system_prompt
+    """FS, Gmail, web e router: stesso vincolo TTS, niente drift tra agenti."""
+    assert SPOKEN_REPLY_RULE in FS_LOOP_SPEC.system_prompt
     assert SPOKEN_REPLY_RULE in GMAIL_LOOP_SPEC.system_prompt
     assert SPOKEN_REPLY_RULE in WEB_LOOP_SPEC.system_prompt
+    assert SPOKEN_REPLY_RULE in MASTER_LOOP_SPEC.system_prompt
 
 
 def test_prepare_spoken_text_strips_markdown_email_list() -> None:
@@ -64,12 +67,14 @@ def test_loop_speaks_cleaned_markdown(tmp_path: Path) -> None:
             return None
 
     outfile = StringIO()
+    # Spec router esplicito: il default del motore è già master, qui si vede.
     code = run_chat_loop(
         MockSTT(infile=StringIO("ultime email\nesci\n"), outfile=outfile, prompt=""),
         MockTTS(outfile=outfile, prefix="[TTS] "),
         _MarkdownLLM(),
         report_latency=False,
         telemetry_db=tmp_path / "telemetry.db",
+        spec=MASTER_LOOP_SPEC,
     )
     assert code == 0
     spoken = outfile.getvalue()

@@ -641,7 +641,7 @@ def test_web_loop_search_then_spoken_summary(
     )
     assert code == 0
     spoken = outfile.getvalue()
-    # Intro dello specialista web; il master FS e Gmail non devono comparire.
+    # Intro dello specialista web; FS e Gmail non devono comparire.
     assert "Agente di ricerca web" in spoken
     assert "Assistente file sul Desktop" not in spoken
     assert "secondo ansa punto it" in spoken

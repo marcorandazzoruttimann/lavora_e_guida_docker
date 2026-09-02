@@ -14,6 +14,7 @@ from lavora_e_guida.audio.factory import create_audio_pair, create_stt, create_t
 from lavora_e_guida.audio.http_bridge import HttpBridgeSTT, HttpBridgeTTS
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
 from lavora_e_guida.config import Settings
+from lavora_e_guida.fs.agent import FS_LOOP_SPEC
 from lavora_e_guida.llm.turn import FunctionCall, LlmTurn
 from lavora_e_guida.llm.usage import TokenUsage
 
@@ -61,12 +62,14 @@ def test_agent_loop_mock_end_to_end(tmp_path: Path) -> None:
     stt = MockSTT(infile=infile, outfile=outfile, prompt="")
     tts = MockTTS(outfile=outfile, prefix="[TTS] ")
     # DB temporaneo: non toccare runtime/telemetry.db del repo.
+    # Spec FS esplicito: il default del loop è il router master.
     code = run_chat_loop(
         stt,
         tts,
         _FakeLLM(),
         report_latency=False,
         telemetry_db=tmp_path / "telemetry.db",
+        spec=FS_LOOP_SPEC,
     )
     assert code == 0
     spoken = outfile.getvalue()
@@ -110,7 +113,7 @@ def test_agent_loop_uses_custom_spec(tmp_path: Path) -> None:
     seen_system: list[str] = []
 
     def dispatch(tool: str, args: dict[str, object]) -> str:
-        # Lo spec, non il master FS, deve eseguire questo tool.
+        # Lo spec, non lo specialista FS, deve eseguire questo tool.
         assert tool == "list_emails"
         assert args.get("query") == "inbox"
         return "OK: 1 email in inbox. 1. Da Mario, oggetto Fattura."
@@ -155,7 +158,7 @@ def test_agent_loop_uses_custom_spec(tmp_path: Path) -> None:
     )
     assert code == 0
     spoken = outfile.getvalue()
-    # Intro dello spec, non quella del master FS.
+    # Intro dello spec, non quella dello specialista FS.
     assert "Agente Gmail in sola lettura" in spoken
     assert "Lab Ollama FS" not in spoken
     assert "Assistente file sul Desktop" not in spoken

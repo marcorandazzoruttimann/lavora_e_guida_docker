@@ -2,7 +2,16 @@
 
 Collega un account Gmail personale (`GMAIL_USER`) alla Gmail API REST. Il consenso OAuth è un’operazione **da scrivania, una tantum**: non parte dal loop vocale `lavora-e-guida` e non è un tool Gemini.
 
-Il loop Gmail (`--agent gmail`) gira su **Gemini** con function calling nativo (`functionDeclarations` + `functionCall` / `parts[].text`), come il master FS. Qwen 2.5 3B è extra di studio: `--llm ollama` sul loop vocale è fail-fast parlante.
+Il loop Gmail (`--agent gmail`) gira su **Gemini** con function calling nativo (`functionDeclarations` + `functionCall` / `parts[].text`), come gli altri tre agenti (router master, specialista FS, specialista web). Qwen 2.5 3B è extra di studio: `--llm ollama` sul loop vocale è fail-fast parlante.
+
+| Agente | Comando | Ruolo rispetto a Gmail |
+| --- | --- | --- |
+| master (default) | `lavora-e-guida` | Router: `ask_gmail` smista qui. Il token si chiede al primo `ask_gmail`, non all’avvio |
+| fs | `lavora-e-guida --agent fs` | File e RAG sul Desktop: non tocca la mailbox |
+| gmail | `lavora-e-guida --agent gmail` | Specialista isolato: catalogo list/read/draft/send, fail-fast se manca il token |
+| web | `lavora-e-guida --agent web` | Ricerca Tavily: non tocca la mailbox |
+
+Flusso composto dal router: «Cerca il meteo di Roma e mandalo a mario@x.it» → round 1 `ask_web` → round 2 `ask_gmail` con destinatario e testo. HITL sì/no resta sul loop esterno. Nessun file sul Desktop se non è stato chiesto.
 
 - **API:** Gmail REST, non IMAP.
 - **Client:** un solo ID OAuth tipo **Desktop**, un solo file token.
@@ -94,7 +103,7 @@ Se il token su disco esiste ma **non copre** gli scope che il codice chiede (es.
 
 ## 6. Loop vocale e assenza di token
 
-`lavora-e-guida` non avvia mai OAuth. Se il token manca, il refresh fallisce o gli scope non bastano, i tool email rispondono in italiano, ad esempio:
+`lavora-e-guida` non avvia mai OAuth. `--agent gmail` fa fail-fast all’avvio se manca il token. Il router (`--agent master`) parte comunque; al primo `ask_gmail` senza token lo specialista risponde con lo stesso `ERRORE:` parlante, senza nested Gemini. Se il refresh fallisce o gli scope non bastano, i tool email rispondono in italiano, ad esempio:
 
 `ERRORE: Gmail non collegata, esegui autenticazione a tavolino`
 

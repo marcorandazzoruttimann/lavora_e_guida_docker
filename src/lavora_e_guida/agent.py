@@ -1,16 +1,21 @@
-"""Loop vocale riusabile: STT → Gemini (functionCall / testo) → dispatch → TTS.
+"""Motore del loop vocale: STT → Gemini (functionCall / testo) → dispatch → TTS.
 
-Il default è lo specialista FS (`master` in CLI: create/append/read/find sul
-Desktop). Gli specialisti passano un `LoopSpec` diverso; questo modulo non
-importa i tool Gmail. Function calling nativo: niente JSON `{"tool","args"}`.
+Questo modulo non è uno specialista: niente catalogo FS/Gmail/web. Gli
+specialisti passano un `LoopSpec`; il default (`spec=None`) è il router
+master, importato lazy per non ciclare con `master.agent`.
+
+Function calling nativo: niente JSON `{"tool","args"}`. Il giro tool è
+`run_specialist_task` (senza TTS): il loop esterno parla solo l'esito.
 """
 
 from __future__ import annotations
 
+import importlib
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -24,137 +29,28 @@ from lavora_e_guida.config import (
 from lavora_e_guida.llm.cloud import GeminiChat
 from lavora_e_guida.llm.errors import LLMError
 from lavora_e_guida.llm.local_ollama import LocalOllama
-from lavora_e_guida.llm.spoken import SPOKEN_REPLY_RULE, prepare_spoken_text
+from lavora_e_guida.llm.spoken import prepare_spoken_text
 from lavora_e_guida.llm.turn import FunctionCall, LlmTurn
 from lavora_e_guida.llm.usage import TokenUsage
 from lavora_e_guida.telemetry import TelemetryDB, utc_now_iso
-from lavora_e_guida.tools.catalog import (
-    ToolDeclaration,
-    object_schema,
-    string_param,
-    to_gemini_tools,
-)
-from lavora_e_guida.tools.find import FindToolError, find_file
-from lavora_e_guida.tools.fs import (
-    FsToolError,
-    append_note,
-    create_text_file,
-    read_file,
-)
-
-# Prompt: identità e regole. Gli schemi stanno nelle functionDeclarations.
-# SPOKEN_REPLY_RULE è condiviso con Gmail: stesso vincolo TTS su ogni specialista.
-_SYSTEM_PROMPT = (
-    "Sei l'assistente vocale del laboratorio sul Desktop. "
-    "Usa i tool per creare, aggiornare, leggere e cercare file. "
-    "Dopo un tool, conferma in italiano all'utente con una frase breve. "
-    "Un solo tool per enunciato. Non inventare path. "
-    "Il path lo risolve Python: tu passi solo name o query.\n\n"
-    "Esempio: l'utente dice «Aggiungi latte alla spesa» → "
-    "chiama append_note con name spesa e content latte. "
-    "Poi conferma a voce che hai aggiunto latte.\n\n"
-    f"{SPOKEN_REPLY_RULE}"
-)
-
-# Intro TTS dello specialista FS (CLI --agent master): non è una reply LLM.
-_MASTER_INTRO_TEXT = (
-    "Assistente file sul Desktop: posso creare, aggiornare e leggere file, "
-    "cercare per contenuto con find file. Di' esci per terminare."
-)
-
-# Comandi di uscita case-insensitive: allineati all'entrypoint vocale.
-_EXIT_WORDS = frozenset({"esci", "exit", "quit"})
-
-# Nomi tool FS: whitelist anti-invenzione (Gemini a volte inventa funzioni).
-_TOOL_CREATE = "create_text_file"
-_TOOL_APPEND = "append_note"
-_TOOL_READ = "read_file"
-_TOOL_FIND = "find_file"
-
-# Catalogo FS: stesso gesto Impesud, involucro Gemini (vedi to_gemini_tools).
-FS_TOOL_DECLARATIONS: tuple[ToolDeclaration, ...] = (
-    ToolDeclaration(
-        name=_TOOL_CREATE,
-        description=(
-            "Crea un file di testo sul Desktop (notes/ o inbox/). "
-            "Usa name per il file (es. spesa) e content per il testo iniziale."
-        ),
-        parameters=object_schema(
-            {
-                "name": string_param("Nome del file, senza path (es. spesa)."),
-                "content": string_param("Testo da scrivere nel file nuovo."),
-            },
-            required=("name", "content"),
-        ),
-    ),
-    ToolDeclaration(
-        name=_TOOL_APPEND,
-        description=(
-            "Aggiunge una riga a una nota esistente sul Desktop. "
-            "Se il file non c'è, Python lo crea sotto notes/. "
-            "Esempio: name spesa, content latte."
-        ),
-        parameters=object_schema(
-            {
-                "name": string_param("Nome della nota (es. spesa)."),
-                "content": string_param("Testo da aggiungere (es. latte)."),
-            },
-            required=("name", "content"),
-        ),
-    ),
-    ToolDeclaration(
-        name=_TOOL_READ,
-        description=(
-            "Legge un file di testo o PDF sul Desktop. "
-            "Passa name (es. spesa o il titolo del PDF). Non inventare path."
-        ),
-        parameters=object_schema(
-            {
-                "name": string_param("Nome del file da leggere."),
-            },
-            required=("name",),
-        ),
-    ),
-    ToolDeclaration(
-        name=_TOOL_FIND,
-        description=(
-            "Cerca nei file del Desktop per contenuto (RAG). "
-            "Usa query con le parole dell'utente (es. dove ho scritto cetrioli)."
-        ),
-        parameters=object_schema(
-            {
-                "query": string_param("Frase di ricerca in italiano."),
-            },
-            required=("query",),
-        ),
-    ),
-)
-
-# Mappa nome → presenza: il dispatch usa questa whitelist, non importa Gmail.
-FS_TOOL_MAP: dict[str, Any] = {
-    _TOOL_CREATE: create_text_file,
-    _TOOL_APPEND: append_note,
-    _TOOL_READ: read_file,
-    _TOOL_FIND: find_file,
-}
-
-_ALLOWED_TOOLS = frozenset(FS_TOOL_MAP)
-
-# Limite round tool per turno utente: evita loop se il modello ripete la call.
-_MAX_TOOL_ROUNDS = 4
-
-# Body Gemini: functionDeclarations dello specialista FS.
-FS_GEMINI_TOOLS = to_gemini_tools(FS_TOOL_DECLARATIONS)
-
 
 # Dispatch: Python esegue il tool; ritorna stringa di esito per functionResponse.
 ToolDispatch = Callable[[str, dict[str, Any]], str]
-# Stampa esito su stdout ([FS], [RAG], [GMAIL]); lo spec decide il prefisso.
+# Stampa esito su stdout ([FS], [RAG], [GMAIL], [WEB]); lo spec decide il prefisso.
 ToolResultPrinter = Callable[[str, str], None]
 # Dopo un tool: se ritorna testo, il loop lo parla e attende HITL (niente LLM).
 HitlAfterTool = Callable[[str, str], str | None]
 # All'ascolto: se ritorna testo, è gestito (sì/no) e non passa da Gemini.
 HitlOnUtterance = Callable[[str], str | None]
+
+# Comandi di uscita case-insensitive: allineati all'entrypoint vocale.
+_EXIT_WORDS = frozenset({"esci", "exit", "quit"})
+
+# Limite round tool per turno utente: evita loop se il modello ripete la call.
+_MAX_TOOL_ROUNDS = 4
+
+# Esito di un giro specialista: il loop (o il master) parla `text`.
+SpecialistKind = Literal["text", "hitl", "error", "exhausted"]
 
 
 @dataclass(frozen=True)
@@ -162,7 +58,8 @@ class AgentSpec:
     """Dato statico di uno specialista (nome, ruolo, tool ammessi, dispatch).
 
     Non è il motore del loop: `LoopSpec` avvolge prompt + tools Gemini + HITL.
-    `master` in CLI è lo specialista FS (`name='fs'`), non un router.
+    Ogni pacchetto specialista costruisce la propria istanza; questo modulo
+    non ne possiede nessuna.
     """
 
     name: str
@@ -178,8 +75,9 @@ class AgentSpec:
 class LoopSpec:
     """Contratto del loop: prompt, dispatch, intro TTS, catalogo Gemini, HITL.
 
-    Default = specialista FS (`MASTER_LOOP_SPEC`). Gmail passa un'istanza
-    propria; il master non importa i tool email.
+    Il motore non ha uno spec di default in questo file: `run_chat_loop`
+    risolve `spec=None` con un import lazy del router master. Gmail/web/fs
+    passano un'istanza propria; il motore non importa i loro tool.
     """
 
     # System prompt fisso in testa alla storia per tutta la sessione.
@@ -198,6 +96,26 @@ class LoopSpec:
     hitl_on_utterance: HitlOnUtterance | None = None
 
 
+@dataclass(frozen=True)
+class SpecialistTurnResult:
+    """Esito di un giro tool **senza TTS**: il caller parla `text`.
+
+    `kind`:
+      text — reply parlata del modello (`parts[].text` già pulita per edge-tts)
+      hitl — lo spec ha aperto una conferma (bozza Gmail): parlare `hitl_spoken`
+      error — LLMError o modello vuoto
+      exhausted — 4 round senza reply finale
+
+    `text` va nella `functionResponse` del master oppure al TTS del loop.
+    `usage` è la somma dei round (TokenUsage è frozen: non si muta in place).
+    """
+
+    kind: SpecialistKind
+    text: str
+    hitl_spoken: str | None = None
+    usage: TokenUsage = field(default_factory=TokenUsage)
+
+
 class SupportsChat(Protocol):
     """Contratto del client LLM del loop: Gemini nativo (testabile con mock)."""
 
@@ -212,88 +130,25 @@ class SupportsChat(Protocol):
     def close(self) -> None: ...
 
 
-def _dispatch_tool(tool: str, args: dict[str, Any]) -> str:
-    """Esegue un tool FS whitelist; ritorna stringa di esito per Gemini.
+# Client del giro tool in corso: il dispatch `ask_*` del master lo legge senza
+# cambiare la firma `ToolDispatch` (tool, args) → str. Nested `run_specialist_task`
+# riusa lo stesso oggetto (stesso Gemini del loop vocale). Default None: un
+# dispatch chiamato fuori dal giro (test unitario senza bind) vede l'assenza.
+_active_llm: ContextVar[SupportsChat | None] = ContextVar(
+    "lavora_e_guida_active_llm",
+    default=None,
+)
 
-    Side-effect: I/O FS solo via tools_fs (confinato a WORKSPACE_ROOT).
+
+def get_active_llm() -> SupportsChat | None:
+    """Client LLM del `run_specialist_task` in corso, o None se siamo fuori dal giro.
+
+    Il master lo usa per delegare allo specialista con lo stesso Gemini del
+    loop. Non è un singleton di processo: è uno stack di contextvar, così un
+    nested `run_specialist_task` (ask_web dentro ask del master) ripristina
+    il client esterno all'uscita. Side-effect: nessuno.
     """
-    # Whitelist stretta: Gemini a volte inventa nomi; rifiutiamo subito.
-    if tool not in _ALLOWED_TOOLS:
-        allowed = ", ".join(sorted(_ALLOWED_TOOLS))
-        return f"ERRORE: tool sconosciuto {tool!r}. Consentiti: {allowed}."
-
-    try:
-        if tool == _TOOL_FIND:
-            query = args.get("query")
-            if not isinstance(query, str) or not query.strip():
-                return (
-                    "ERRORE: args.query deve essere una stringa non vuota "
-                    "(es. dove ho scritto dei cetrioli)."
-                )
-            return find_file(query)
-
-        # Il caller garantisce già un dict (args validi oppure {}).
-        name = args.get("name")
-        if not isinstance(name, str) or not name.strip():
-            return "ERRORE: args.name deve essere una stringa non vuota (es. spesa.txt)."
-
-        if tool == _TOOL_READ:
-            # Solo name: testo o PDF; resolve + dispatch pypdf in tools_fs.
-            return read_file(name)
-
-        # create + append: stesso campo `content` (chiavi omogenee nel catalogo).
-        raw_content = args.get("content", args.get("text", ""))
-        content = "" if raw_content is None else str(raw_content)
-
-        if tool == _TOOL_CREATE:
-            return create_text_file(name, content)
-
-        # Whitelist già filtrata: qui resta solo append_note.
-        return append_note(name, content)
-    except (FsToolError, FindToolError) as exc:
-        # Path traversal / assenti / RAG: messaggio già in italiano.
-        return f"ERRORE: {exc}"
-    except OSError as exc:
-        # Disco pieno / permessi WSL→Windows: non propaghiamo stacktrace.
-        return f"ERRORE I/O durante operazione file: {exc}"
-
-
-def _print_find_file_to_terminal(result: str) -> bool:
-    """Stampa chunk RAG su stdout (prefisso [RAG]) se find_file ha avuto successo."""
-    if not result.startswith("OK:"):
-        return False
-    if "\n---\n" in result:
-        header, body = result.split("\n---\n", 1)
-        print(f"[RAG] {header}")
-        print(body, end="" if body.endswith("\n") else "\n")
-    else:
-        print(f"[RAG] {result}")
-    return True
-
-
-def _print_read_file_to_terminal(result: str) -> bool:
-    """Stampa a stdout il contenuto letto da read_file (prefisso [FS]).
-
-    Side-effect: print su stdout. Ritorna True se ha stampato un OK.
-    Il TTS resta sul testo del modello; qui mostriamo il testo al terminale.
-    """
-    if not result.startswith("OK:"):
-        return False
-    if "\n" in result:
-        header, body = result.split("\n", 1)
-        print(f"[FS] {header}")
-        print(body, end="" if body.endswith("\n") else "\n")
-    else:
-        print(f"[FS] {result}")
-    return True
-
-
-def _print_master_tool_result(tool: str, result: str) -> None:
-    """Stdout dello specialista FS: [FS] per read_file, [RAG] per find_file."""
-    if tool == _TOOL_READ:
-        _print_read_file_to_terminal(result)
-    elif tool == _TOOL_FIND:
-        _print_find_file_to_terminal(result)
+    return _active_llm.get()
 
 
 def _tool_loop_key(tool: str, args: dict[str, Any]) -> str:
@@ -311,27 +166,24 @@ def _tool_loop_key(tool: str, args: dict[str, Any]) -> str:
     return f"{tool}|{identity}"
 
 
-# Spec di default: specialista FS (CLI master). Test e avvio senza --agent.
-MASTER_AGENT_SPEC = AgentSpec(
-    name="fs",
-    role="Assistente file sul Desktop",
-    goal="Creare, aggiornare, leggere e cercare file sotto WORKSPACE_ROOT.",
-    tools=tuple(FS_TOOL_MAP),
-    dispatch=_dispatch_tool,
-    intro_text=_MASTER_INTRO_TEXT,
-    backstory=(
-        "Specialista filesystem/RAG. Non legge Gmail: lo specialista email "
-        "è `--agent gmail`."
-    ),
-)
+def _default_loop_spec() -> LoopSpec:
+    """Default vocale: router master, import lazy per non ciclare.
 
-MASTER_LOOP_SPEC = LoopSpec(
-    system_prompt=_SYSTEM_PROMPT,
-    dispatch=_dispatch_tool,
-    intro_text=_MASTER_INTRO_TEXT,
-    gemini_tools=FS_GEMINI_TOOLS,
-    print_tool_result=_print_master_tool_result,
-)
+    Il pacchetto `master` importa `run_specialist_task` da questo modulo:
+    un import eager di `MASTER_LOOP_SPEC` in testa chiuderebbe il ciclo
+    agent ↔ master. Caduta su FS solo se il pacchetto master manca.
+    """
+    try:
+        # importlib: `master.agent` importa `run_specialist_task` da qui. Un
+        # `from` statico in testa a questo modulo chiuderebbe il ciclo
+        # agent ↔ master già all'import (e l'avvio del loop).
+        master_agent = importlib.import_module("lavora_e_guida.master.agent")
+    except ImportError:
+        # Difesa: senza pacchetto master lo specialista file resta avviabile.
+        from lavora_e_guida.fs.agent import FS_LOOP_SPEC
+
+        return FS_LOOP_SPEC
+    return master_agent.MASTER_LOOP_SPEC
 
 
 def _record_stt_turn(
@@ -355,6 +207,162 @@ def _record_stt_turn(
     )
 
 
+def run_specialist_task(
+    spec: LoopSpec,
+    llm: SupportsChat,
+    messages: list[dict[str, Any]],
+    usage: TokenUsage,
+    *,
+    report_latency: bool = True,
+) -> SpecialistTurnResult:
+    """Giro tool di uno specialista: fino a 4 round, **senza TTS**.
+
+    Stesso contratto del vecchio for-round in `run_chat_loop`: una sola
+    `functionCall` eseguita per round, anti-ripetizione, `print_tool_result`,
+    `hitl_after_tool`. La storia `messages` è mutata in place (append-only
+    salvo pop su errore/vuoto). Il caller (loop vocale o dispatch `ask_*`
+    del master) parla `result.text` / `result.hitl_spoken`.
+
+    Side-effect: dispatch dello spec (I/O FS, REST, …); print su stdout se
+    lo spec ha `print_tool_result`. Nessun `tts.speak`. Bind di `get_active_llm`
+    per la durata del giro (il master nested riusa questo stesso `llm`).
+    """
+    # Bind visibile al dispatch `ask_*`: stesso client, senza allargare ToolDispatch.
+    llm_token = _active_llm.set(llm)
+    try:
+        return _run_specialist_task_body(
+            spec,
+            llm,
+            messages,
+            usage,
+            report_latency=report_latency,
+        )
+    finally:
+        # Nested (master → ask_gmail → questo stesso giro) ripristina il bind esterno.
+        _active_llm.reset(llm_token)
+
+
+def _run_specialist_task_body(
+    spec: LoopSpec,
+    llm: SupportsChat,
+    messages: list[dict[str, Any]],
+    usage: TokenUsage,
+    *,
+    report_latency: bool,
+) -> SpecialistTurnResult:
+    """Corpo del giro tool: il bind del client LLM sta nel wrapper pubblico."""
+    # Accumulator locale: TokenUsage è frozen, ogni round produce una somma nuova.
+    accumulated = usage
+    prev_tool_key: str | None = None
+    for _round in range(_MAX_TOOL_ROUNDS):
+        t0 = time.perf_counter()
+        try:
+            # Stesso client Gemini del loop: il master nested riusa la sessione.
+            turn = llm.chat(
+                messages,
+                tools=spec.gemini_tools,
+                options={"temperature": 0.1},
+            )
+        except LLMError as exc:
+            # Chat fallita: togliamo l'ultimo messaggio (di solito l'utterance)
+            # così un retry non riparte da una storia a metà. Token di questo
+            # round non ci sono: non sommiamo `last_usage`.
+            messages.pop()
+            err_label = "Ollama" if isinstance(llm, LocalOllama) else "LLM"
+            return SpecialistTurnResult(
+                kind="error",
+                text=f"Errore {err_label}: {exc}",
+                usage=accumulated,
+            )
+        elapsed = time.perf_counter() - t0
+
+        # Token del round: anche un turno vuoto può aver consumato prompt.
+        accumulated = accumulated + getattr(llm, "last_usage", TokenUsage())
+
+        if report_latency:
+            print(f"[lab] latenza chat: {elapsed:.2f}s", file=sys.stderr)
+
+        if turn.is_empty():
+            # Niente testo né tool: fallback parlante, storia ripulita come prima.
+            messages.pop()
+            return SpecialistTurnResult(
+                kind="error",
+                text="Il modello non ha risposto. Riprova.",
+                usage=accumulated,
+            )
+
+        # Testo senza tool: reply parlata (ex tool=none). Niente TTS qui.
+        if not turn.function_calls:
+            # Storia: testo crudo del modello. Esito: markup rimosso (edge-tts).
+            reply_raw = turn.text.strip()
+            reply_s = prepare_spoken_text(reply_raw)
+            if not reply_s:
+                # Nudge: il modello ha mandato markup-only o spazi. Riprova.
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Manca la frase da dire all'utente. "
+                            "Rispondi in italiano, da leggere a voce, "
+                            "senza markdown e senza tool."
+                        ),
+                    }
+                )
+                continue
+            messages.append({"role": "assistant", "content": reply_raw})
+            return SpecialistTurnResult(
+                kind="text",
+                text=reply_s,
+                usage=accumulated,
+            )
+
+        # Un solo tool eseguito: la prima functionCall, le altre si ignorano.
+        call = turn.function_calls[0]
+        args_dict = call.args if isinstance(call.args, dict) else {}
+        tool = call.name
+        tool_key = _tool_loop_key(tool, args_dict)
+        if prev_tool_key is not None and tool_key == prev_tool_key:
+            # Anti-ripetizione: stessa call di fila → chiediamo la frase, non un altro tool.
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Hai già ricevuto l'esito di questo tool. "
+                        "Rispondi ora in italiano all'utente, da leggere "
+                        "a voce, senza markdown e senza altri tool."
+                    ),
+                }
+            )
+            continue
+
+        messages.append(_assistant_function_call_message(call))
+        result = spec.dispatch(tool, args_dict)
+        if spec.print_tool_result is not None:
+            spec.print_tool_result(tool, result)
+        messages.append(_user_function_response_message(call, result))
+        prev_tool_key = tool_key
+
+        # HITL: dopo la bozza il caller parla e aspetta il prossimo ascolto.
+        # Lo specialista nested (master → ask_gmail) non deve chiamare TTS:
+        # ritorniamo `kind=hitl` e il loop esterno (o lo spec master) parla.
+        if spec.hitl_after_tool is not None:
+            hitl_prompt = spec.hitl_after_tool(tool, result)
+            if hitl_prompt:
+                return SpecialistTurnResult(
+                    kind="hitl",
+                    text=hitl_prompt,
+                    hitl_spoken=hitl_prompt,
+                    usage=accumulated,
+                )
+
+    # Quattro round senza testo finale né HITL: fallback parlante, niente altro tool.
+    return SpecialistTurnResult(
+        kind="exhausted",
+        text="Non sono riuscito a completare l'azione in questo turno. Riprova.",
+        usage=accumulated,
+    )
+
+
 def run_chat_loop(
     stt: BaseSTT,
     tts: BaseTTS,
@@ -368,10 +376,11 @@ def run_chat_loop(
     """Un turno = listen → (functionCall)* → reply TTS; ritorna 0 in uscita.
 
     Side-effect: storia append-only (testo + functionCall/Response); tool dello
-    spec; TTS su ogni reply finale; una riga telemetria per turno vocale valido
-    (non intro / riga vuota / esci).
+    spec; TTS solo sull'esito di `run_specialist_task` (o HITL in ascolto);
+    una riga telemetria per turno vocale valido (non intro / riga vuota / esci).
     """
-    loop_spec = spec if spec is not None else MASTER_LOOP_SPEC
+    # spec=None → router master (lazy). I test FS passano `FS_LOOP_SPEC`.
+    loop_spec = spec if spec is not None else _default_loop_spec()
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": loop_spec.system_prompt},
@@ -406,7 +415,7 @@ def _run_chat_loop_body(
     max_turns: int | None,
     report_latency: bool,
 ) -> int:
-    """Corpo del loop: listen → (HITL | chat/tool) → speak + insert telemetria."""
+    """Corpo del loop: listen → (HITL utterance | specialist task) → speak + insert."""
     turns = 0
     while max_turns is None or turns < max_turns:
         user_text = stt.listen()
@@ -424,6 +433,7 @@ def _run_chat_loop_body(
         stripped = user_text.strip()
 
         # HITL Gmail: sì/no sulla bozza, senza Gemini (stesso posto di `esci`).
+        # Resta sul loop esterno: lo specialista nested non ascolta.
         if spec.hitl_on_utterance is not None:
             hitl_spoken = spec.hitl_on_utterance(stripped)
             if hitl_spoken is not None:
@@ -439,127 +449,26 @@ def _run_chat_loop_body(
 
         messages.append({"role": "user", "content": stripped})
 
-        spoken = False
-        prev_tool_key: str | None = None
-        for _round in range(_MAX_TOOL_ROUNDS):
-            t0 = time.perf_counter()
-            try:
-                turn = llm.chat(
-                    messages,
-                    tools=spec.gemini_tools,
-                    options={"temperature": 0.1},
-                )
-            except LLMError as exc:
-                messages.pop()
-                err_label = "Ollama" if isinstance(llm, LocalOllama) else "LLM"
-                spoken_text = f"Errore {err_label}: {exc}"
-                tts.speak(spoken_text)
-                _record_stt_turn(
-                    store,
-                    started_at=started_at,
-                    usage=usage,
-                    tts_response=spoken_text,
-                )
-                spoken = True
-                break
-            elapsed = time.perf_counter() - t0
-
-            usage = usage + getattr(llm, "last_usage", TokenUsage())
-
-            if report_latency:
-                print(f"[lab] latenza chat: {elapsed:.2f}s", file=sys.stderr)
-
-            if turn.is_empty():
-                messages.pop()
-                spoken_text = "Il modello non ha risposto. Riprova."
-                tts.speak(spoken_text)
-                _record_stt_turn(
-                    store,
-                    started_at=started_at,
-                    usage=usage,
-                    tts_response=spoken_text,
-                )
-                spoken = True
-                break
-
-            # Testo senza tool: reply parlata (ex tool=none).
-            if not turn.function_calls:
-                # Storia: testo crudo del modello. TTS: markup rimosso (edge-tts).
-                reply_raw = turn.text.strip()
-                reply_s = prepare_spoken_text(reply_raw)
-                if not reply_s:
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Manca la frase da dire all'utente. "
-                                "Rispondi in italiano, da leggere a voce, "
-                                "senza markdown e senza tool."
-                            ),
-                        }
-                    )
-                    continue
-                messages.append({"role": "assistant", "content": reply_raw})
-                tts.speak(reply_s)
-                _record_stt_turn(
-                    store,
-                    started_at=started_at,
-                    usage=usage,
-                    tts_response=reply_s,
-                )
-                spoken = True
-                break
-
-            # Un solo tool eseguito: la prima functionCall, le altre si ignorano.
-            call = turn.function_calls[0]
-            args_dict = call.args if isinstance(call.args, dict) else {}
-            tool = call.name
-            tool_key = _tool_loop_key(tool, args_dict)
-            if prev_tool_key is not None and tool_key == prev_tool_key:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Hai già ricevuto l'esito di questo tool. "
-                            "Rispondi ora in italiano all'utente, da leggere "
-                            "a voce, senza markdown e senza altri tool."
-                        ),
-                    }
-                )
-                continue
-
-            messages.append(_assistant_function_call_message(call))
-            result = spec.dispatch(tool, args_dict)
-            if spec.print_tool_result is not None:
-                spec.print_tool_result(tool, result)
-            messages.append(_user_function_response_message(call, result))
-            prev_tool_key = tool_key
-
-            # HITL: dopo la bozza parliamo noi e aspettiamo il prossimo ascolto.
-            if spec.hitl_after_tool is not None:
-                hitl_prompt = spec.hitl_after_tool(tool, result)
-                if hitl_prompt:
-                    tts.speak(hitl_prompt)
-                    _record_stt_turn(
-                        store,
-                        started_at=started_at,
-                        usage=usage,
-                        tts_response=hitl_prompt,
-                    )
-                    spoken = True
-                    break
-
-        if not spoken:
-            spoken_text = (
-                "Non sono riuscito a completare l'azione in questo turno. Riprova."
-            )
-            tts.speak(spoken_text)
-            _record_stt_turn(
-                store,
-                started_at=started_at,
-                usage=usage,
-                tts_response=spoken_text,
-            )
+        # Un solo giro specialista: TTS solo sull'esito (testo, HITL, errore, esausto).
+        result = run_specialist_task(
+            spec,
+            llm,
+            messages,
+            usage,
+            report_latency=report_latency,
+        )
+        # HITL: parla la conferma della bozza; gli altri kind parlano `text`.
+        if result.kind == "hitl" and result.hitl_spoken:
+            spoken_text = result.hitl_spoken
+        else:
+            spoken_text = result.text
+        tts.speak(spoken_text)
+        _record_stt_turn(
+            store,
+            started_at=started_at,
+            usage=result.usage,
+            tts_response=spoken_text,
+        )
 
         turns += 1
 

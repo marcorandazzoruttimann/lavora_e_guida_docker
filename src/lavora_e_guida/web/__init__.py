@@ -1,8 +1,9 @@
 """Specialista di ricerca web: un solo tool `web_search` sopra Tavily.
 
-Isolato come il pacchetto `gmail/`: il master FS/RAG non deve importare da
-qui, e questo pacchetto non importa i tool FS. La sintesi parlata la produce
-Gemini nel loop (`include_answer=False` su Tavily: portiamo il nostro LLM).
+Pacchetto dello specialista `--agent web` (e del nested `ask_web` del router).
+Isolato come `gmail/` e `fs/`: lo specialista FS non deve importare da qui, e
+questo pacchetto non importa i tool FS. La sintesi parlata la produce Gemini
+nel loop (`include_answer=False` su Tavily: portiamo il nostro LLM).
 """
 
 from lavora_e_guida.web.search import (

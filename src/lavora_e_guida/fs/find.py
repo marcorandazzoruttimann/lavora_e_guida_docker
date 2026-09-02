@@ -1,7 +1,9 @@
-"""Tool `find_file`: ricerca semantica RAG (Chroma) sul workspace Desktop.
+"""Tool `find_file` dello specialista FS: ricerca semantica RAG sul Desktop.
 
-Contratto: query in linguaggio naturale → path relativo + chunk rilevante.
-Nessun LLM nel retrieval: sync SQLite hash + embed MiniLM ONNX via Chroma.
+Stessa forma di `gmail/read.py`: il retrieval vive nel pacchetto specialista,
+non in `tools/`. Contratto: query in linguaggio naturale → path relativo +
+chunk rilevante. Nessun LLM nel retrieval: sync SQLite hash + embed MiniLM
+ONNX via Chroma (`rag/` resta la libreria indice).
 """
 
 from __future__ import annotations
@@ -10,10 +12,10 @@ import logging
 from pathlib import Path
 
 from lavora_e_guida.config import INDEX_ROOT, WORKSPACE_ROOT
+from lavora_e_guida.fs.files import FsToolError
 from lavora_e_guida.rag.chroma_store import ChromaStore
 from lavora_e_guida.rag.index_db import db_path
 from lavora_e_guida.rag.index_sync import sync_workspace_index
-from lavora_e_guida.tools.fs import FsToolError
 
 logger = logging.getLogger(__name__)
 

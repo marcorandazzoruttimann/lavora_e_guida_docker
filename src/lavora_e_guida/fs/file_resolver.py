@@ -1,10 +1,12 @@
 """Resolver deterministico path file (RapidFuzz), senza LLM.
 
-Da una traccia STT / nome tool (“leggimi spesa punto txt”) restituisce il
+Vive nel pacchetto specialista FS (come `gmail/read.py`): i tool
+`append_note` / `read_file` lo usano per mappare la traccia STT sul file
+reale. Da una traccia / nome tool («leggimi spesa punto txt») restituisce il
 `Path` **relativo** reale nel workspace Desktop, oppure `None` se sotto soglia.
 
 Contratto: nessun I/O di scrittura; solo `rglob` in lettura. I tool chiamanti
-fanno poi `(workspace_dir / rel).resolve()` + check `relative_to`.
+in `fs/files.py` fanno poi `(workspace_dir / rel).resolve()` + check `relative_to`.
 
 Numeri: STT e basename vengono canonizzati così
 `progetto 03` / `progetto_03` / `progetto-03` / `progetto zero tre` /

@@ -1,8 +1,17 @@
-# Ricerca web con Tavily (`--agent web`)
+# Ricerca web con Tavily (`--agent web` e `ask_web` del master)
 
 Collega l’assistente vocale a [Tavily](https://tavily.com), un motore di ricerca pensato per gli LLM: restituisce titolo, URL e uno snippet già estratto, non una pagina HTML da ripulire.
 
-L’agente `web` è uno **specialista isolato**, come Gmail: non tocca i file del Desktop né l’indice RAG, e il master non lo importa. Gira su **Gemini** con function calling nativo (`functionDeclarations` + `functionCall` / `parts[].text`). Qwen 2.5 3B resta extra di studio: `--llm ollama` sul loop vocale è fail-fast parlante.
+| Agente | Comando | Ruolo rispetto a Tavily |
+| --- | --- | --- |
+| master (default) | `lavora-e-guida` | Router: `ask_web` smista qui. La chiave si chiede al primo `ask_web`, non all’avvio |
+| fs | `lavora-e-guida --agent fs` | File e RAG sul Desktop: non cerca online |
+| gmail | `lavora-e-guida --agent gmail` | Mailbox: non cerca online |
+| web | `lavora-e-guida --agent web` | Specialista isolato: un solo tool `web_search`, fail-fast se manca `TAVILY_API_KEY` |
+
+L’agente `web` è uno **specialista isolato**, come Gmail e FS: non tocca i file del Desktop né l’indice RAG, e il catalogo Gemini del master non importa `web_search` (solo `ask_web`). Gira su **Gemini** con function calling nativo (`functionDeclarations` + `functionCall` / `parts[].text`). Qwen 2.5 3B resta extra di studio: `--llm ollama` sul loop vocale è fail-fast parlante.
+
+Flusso composto dal router: «Cerca il meteo di Roma e mandalo a mario@x.it» → round 1 `ask_web` (questo specialista) → round 2 `ask_gmail` con destinatario e testo trovato. Nessun `create_text_file` se l’utente non ha chiesto un file.
 
 Il pattern è quello Gmail, non il grounding nativo di Google: Gemini emette una `functionCall`, Python esegue la REST Tavily, l’esito rientra nel loop come `functionResponse` e **la sintesi parlata la scrive Gemini**. Per questo chiediamo a Tavily gli snippet grezzi (`include_answer=False`) e non la sua risposta già confezionata: il nostro LLM ce l’abbiamo già.
 
@@ -18,7 +27,7 @@ TAVILY_API_KEY=tvly-...
 
 Non serve nessun consenso OAuth né alcun file token: a differenza di Gmail qui c’è solo una chiave statica. Non committare la chiave e non metterla in `.env.example`.
 
-La chiave è **obbligatoria solo per `--agent web`**: gli altri agenti partono anche senza. Il campo `tavily_api_key` in `Settings` resta opzionale proprio per questo, e il fail-fast vive nella CLI.
+La chiave è **obbligatoria all’avvio solo per `--agent web`**: gli altri specialisti (`fs`, `gmail`) partono anche senza. Il router (`--agent master`) parte comunque (serve il Desktop per `ask_fs`); al primo `ask_web` senza chiave lo specialista risponde con un `ERRORE:` parlante, senza nested Gemini. Il campo `tavily_api_key` in `Settings` resta opzionale proprio per questo, e il fail-fast CLI vive solo sul ramo `--agent web`.
 
 ## 2. Avvio
 

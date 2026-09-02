@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from lavora_e_guida.agent import FS_GEMINI_TOOLS, FS_TOOL_DECLARATIONS, MASTER_AGENT_SPEC
+from lavora_e_guida.fs.agent import FS_AGENT_SPEC, FS_GEMINI_TOOLS, FS_TOOL_DECLARATIONS
 from lavora_e_guida.gmail.agent import GMAIL_GEMINI_TOOLS, GMAIL_TOOL_DECLARATIONS
+from lavora_e_guida.master.agent import (
+    MASTER_AGENT_SPEC,
+    MASTER_GEMINI_TOOLS,
+    MASTER_TOOL_DECLARATIONS,
+)
 from lavora_e_guida.tools.catalog import (
     ToolDeclaration,
     enum_param,
@@ -53,10 +58,11 @@ def test_enum_param_declares_closed_value_set() -> None:
 
 
 def test_fs_gmail_and_web_catalogs_are_isolated() -> None:
-    """Tre mappe: FS non contiene list_emails; Gmail e web non contengono append_note."""
+    """Quattro agenti: tre cataloghi di dominio disgiunti; master solo i tre ask_*."""
     fs_names = {item.name for item in FS_TOOL_DECLARATIONS}
     gmail_names = {item.name for item in GMAIL_TOOL_DECLARATIONS}
     web_names = {item.name for item in WEB_TOOL_DECLARATIONS}
+    master_names = {item.name for item in MASTER_TOOL_DECLARATIONS}
     assert fs_names == {
         "create_text_file",
         "append_note",
@@ -79,7 +85,12 @@ def test_fs_gmail_and_web_catalogs_are_isolated() -> None:
     assert "web_search" not in fs_names
     assert "web_search" not in gmail_names
     assert not web_names & (fs_names | gmail_names)
-    assert MASTER_AGENT_SPEC.name == "fs"
+    assert FS_AGENT_SPEC.name == "fs"
     assert FS_GEMINI_TOOLS[0]["functionDeclarations"]
     assert GMAIL_GEMINI_TOOLS[0]["functionDeclarations"]
     assert WEB_GEMINI_TOOLS[0]["functionDeclarations"]
+    # Router: Gemini del master non vede create_text_file / list_emails / web_search.
+    assert MASTER_AGENT_SPEC.name == "master"
+    assert master_names == {"ask_fs", "ask_gmail", "ask_web"}
+    assert not master_names & (fs_names | gmail_names | web_names)
+    assert MASTER_GEMINI_TOOLS[0]["functionDeclarations"]

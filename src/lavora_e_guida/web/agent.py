@@ -1,8 +1,14 @@
 """Spec vocale dell'agente di ricerca web: un solo tool `web_search` su Tavily.
 
-Copia strutturale dello specialista Gmail: importa da `lavora_e_guida.agent`
-solo `LoopSpec` / `AgentSpec` (il contratto del loop), mai i tool FS/RAG del
-master, e il master non importa questo file.
+Uno dei quattro agenti vocali (`master` router, `fs` Desktop, `gmail` mailbox,
+`web` qui). Copia strutturale dello specialista Gmail: importa da
+`lavora_e_guida.agent` solo `LoopSpec` / `AgentSpec` (il contratto del loop),
+mai i tool FS/RAG, e lo specialista FS (`--agent fs`) non importa questo file.
+
+Due modi di girare: `--agent web` (loop isolato, fail-fast sulla chiave Tavily)
+oppure nested dal router (`ask_web`). Flusso composto: «cerca il meteo e
+mandalo a Mario» è del master (prima `ask_web`, poi `ask_gmail` con il testo);
+questo specialista fa solo la ricerca.
 
 Il pattern è quello del function calling, non del grounding nativo: Gemini
 emette una `functionCall web_search`, Python esegue la REST Tavily e rimanda
@@ -46,7 +52,7 @@ _TOOL_SEARCH = "web_search"
 _TOPIC_VALUES = ("general", "news")
 _TIME_RANGE_VALUES = ("day", "week", "month", "year")
 
-# Catalogo web isolato: né il master FS né lo specialista Gmail importano di qui.
+# Catalogo web isolato: né lo specialista FS né Gmail importano di qui.
 WEB_TOOL_DECLARATIONS: tuple[ToolDeclaration, ...] = (
     ToolDeclaration(
         name=_TOOL_SEARCH,
@@ -196,7 +202,7 @@ WEB_AGENT_SPEC = AgentSpec(
     intro_text=_WEB_INTRO_TEXT,
     backstory=(
         "Specialista di ricerca online. Non tocca i file del Desktop né la "
-        "mailbox: quelli sono degli specialisti FS (`--agent master`) e Gmail."
+        "mailbox: quelli sono degli specialisti FS (`--agent fs`) e Gmail."
     ),
 )
 

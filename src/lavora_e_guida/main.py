@@ -1,8 +1,9 @@
 """Entrypoint vocale: Mock/HTTP STT/TTS + Gemini (function calling) + agente.
 
 Avvio: `lavora-e-guida` oppure `python -m lavora_e_guida`.
-Agente: `--agent master|gmail|web` (master = specialista FS/RAG, gmail =
-mailbox con conferma, web = ricerca online via Tavily).
+Agente: `--agent master|fs|gmail|web`. Default `master` = router (tre
+`ask_*` verso gli specialisti). `fs` = specialista file/RAG sul Desktop
+(ex default). `gmail` = mailbox con conferma. `web` = ricerca Tavily.
 Switch LLM: `--llm gemini|ollama` (default gemini). `--llm ollama` è fail-fast
 parlante: il 3B non avvia il loop.
 Audio: `AUDIO_DRIVER=mock|http` da Settings (factory, non Mock hardcoded).
@@ -26,19 +27,22 @@ from lavora_e_guida.config import (
     Settings,
     get_settings,
 )
+from lavora_e_guida.fs.agent import FS_LOOP_SPEC
+from lavora_e_guida.fs.files import ensure_workspace
 from lavora_e_guida.gmail.agent import GMAIL_LOOP_SPEC
 from lavora_e_guida.gmail.oauth import GmailAuthError, get_gmail_credentials
 from lavora_e_guida.llm.cloud import GeminiChat
+from lavora_e_guida.master.agent import MASTER_LOOP_SPEC
 from lavora_e_guida.rag.index_sync import sync_workspace_index
-from lavora_e_guida.tools.fs import ensure_workspace
 from lavora_e_guida.web.agent import WEB_LOOP_SPEC
 
 # Alias del tipo agente: una sola fonte per `--agent`, banner e firma interne.
-AgentName = Literal["master", "gmail", "web"]
+AgentName = Literal["master", "fs", "gmail", "web"]
 
 # Nomi tool nel banner: allineati allo spec, così a occhio si vede cosa parla.
-# master = specialista FS (non un router).
-_MASTER_TOOLS_BANNER = "create_text_file,append_note,read_file,find_file"
+# master = router (tre ask_*); fs = catalogo di dominio sul Desktop.
+_MASTER_TOOLS_BANNER = "ask_fs,ask_gmail,ask_web"
+_FS_TOOLS_BANNER = "create_text_file,append_note,read_file,find_file"
 _GMAIL_TOOLS_BANNER = (
     "list_emails,read_email,save_attachments,draft_email,reply_email,reply_all_email,send_email"
 )
@@ -63,16 +67,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="lavora-e-guida",
         description=(
-            "Assistente vocale: specialista FS/RAG sul Desktop (`master`), "
-            "Gmail (lettura e invio con conferma) oppure ricerca web (`web`)."
+            "Assistente vocale: router master (default, delega a FS/Gmail/web), "
+            "specialista file (`fs`), Gmail (lettura e invio con conferma) "
+            "oppure ricerca web (`web`)."
         ),
     )
-    # Default master: specialista FS; il router-only è un piano successivo.
+    # Default master = router. `--agent fs` è lo specialista Desktop (ex default).
     parser.add_argument(
         "--agent",
-        choices=("master", "gmail", "web"),
+        choices=("master", "fs", "gmail", "web"),
         default="master",
-        help="Agente vocale: master (FS/RAG), gmail o web. Default: master.",
+        help=(
+            "Agente vocale: master (router), fs (Desktop), gmail o web. "
+            "Default: master."
+        ),
     )
     # Ollama resta nel parser per il fail-fast parlante, non per avviare Qwen.
     parser.add_argument(
@@ -110,11 +118,12 @@ def _startup_gemini(llm: GeminiChat) -> None:
         raise SystemExit(1)
 
 
-def _prepare_master_workspace() -> Path:
-    """Crea Desktop notes/inbox e sincronizza l'indice RAG. Solo agente master.
+def _prepare_workspace() -> Path:
+    """Crea Desktop notes/inbox e sincronizza l'indice RAG.
 
-    Gmail non deve toccare il workspace né Chroma: lo specialista email non
-    mescola FS/RAG. SystemExit(1) se il Desktop non è montato (WSL → Host).
+    Lo usano il router (`master`, serve `ask_fs`) e lo specialista `--agent fs`.
+    Gmail e web non devono toccare il workspace né Chroma. SystemExit(1) se
+    il Desktop non è montato (WSL → Host).
     """
     # Root Desktop + notes/ + inbox/: i file dell'agente restano fuori dal repo.
     try:
@@ -149,10 +158,12 @@ def _prepare_master_workspace() -> Path:
 
 
 def _require_gmail_token(settings: Settings) -> None:
-    """Fail-fast: senza token il loop Gmail non parte. Mai apre il browser.
+    """Fail-fast: senza token il loop `--agent gmail` non parte. Mai apre il browser.
 
-    Stesso contratto di `get_gmail_credentials`: file assente, refresh o scope
-    → GmailAuthError parlante (autenticazione a tavolino). SystemExit(1).
+    Il router (`--agent master`) non chiama questa funzione: il gate è lazy in
+    `ask_gmail`. Stesso contratto di `get_gmail_credentials`: file assente,
+    refresh o scope → GmailAuthError parlante (autenticazione a tavolino).
+    SystemExit(1).
     """
     try:
         # Carica/rinfresca il JSON su disco; non lancia InstalledAppFlow.
@@ -164,12 +175,14 @@ def _require_gmail_token(settings: Settings) -> None:
 
 
 def _require_tavily_key(settings: Settings) -> None:
-    """Fail-fast: senza `TAVILY_API_KEY` il loop web non parte. SystemExit(1).
+    """Fail-fast: senza `TAVILY_API_KEY` il loop `--agent web` non parte. SystemExit(1).
 
-    Stesso spirito di `_startup_gemini`: meglio un messaggio chiaro all'avvio che
-    scoprire la chiave mancante al primo `web_search`, quando l'utente ha già
-    parlato. Qui non si fa nessuna chiamata di rete: Tavily non ha un endpoint di
-    ping gratuito, e un ping a pagamento brucerebbe un credito a ogni avvio.
+    Il router (`--agent master`) non chiama questa funzione: il gate è lazy in
+    `ask_web`. Stesso spirito di `_startup_gemini`: meglio un messaggio chiaro
+    all'avvio che scoprire la chiave mancante al primo `web_search`, quando
+    l'utente ha già parlato. Qui non si fa nessuna chiamata di rete: Tavily non
+    ha un endpoint di ping gratuito, e un ping a pagamento brucerebbe un credito
+    a ogni avvio.
     """
     # `or ""` + strip: nel `.env` la riga può esserci ma vuota (`TAVILY_API_KEY=`).
     if not (settings.tavily_api_key or "").strip():
@@ -185,8 +198,9 @@ def _print_startup_banner(
     audio_driver: str,
     workspace_root: Path | None,
 ) -> None:
-    """Stderr di avvio: master invariato; gmail e web senza data/index FS."""
-    # Master: stesso testo di prima così i log e gli script a occhio non cambiano.
+    """Stderr di avvio: router con data/index e ask_*; specialisti col proprio catalogo."""
+    # Router: data/index perché ask_fs usa il Desktop; tools solo i tre ask_*.
+    # Niente `agent=` in testa: è il default, i log storici partono da provider=.
     if agent == "master":
         print(
             f"[lab] provider={provider} modello={model} "
@@ -196,7 +210,18 @@ def _print_startup_banner(
             file=sys.stderr,
         )
         return
-    # Specialisti senza FS: niente workspace Desktop né indice RAG nella riga.
+    # Specialista file: stessi path del router, catalogo di dominio, `agent=fs`
+    # così in debug si distingue dal default senza confondersi col banner Gmail.
+    if agent == "fs":
+        print(
+            f"[lab] agent=fs provider={provider} modello={model} "
+            f"data={workspace_root} index={INDEX_ROOT} "
+            f"audio={audio_driver} "
+            f"tools={_FS_TOOLS_BANNER}",
+            file=sys.stderr,
+        )
+        return
+    # Gmail e web: niente workspace Desktop né indice RAG nella riga.
     # Gmail elenca bozza/invio, web il solo `web_search`.
     tools = _GMAIL_TOOLS_BANNER if agent == "gmail" else _WEB_TOOLS_BANNER
     print(
@@ -208,7 +233,7 @@ def _print_startup_banner(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Parse CLI, ping Gemini, prepara master/Gmail/web, loop fino a 'esci'."""
+    """Parse CLI, ping Gemini, prepara master/fs/Gmail/web, loop fino a 'esci'."""
     # .env in cwd/repo: GEMINI_API_KEY / GMAIL_* / TAVILY_API_KEY senza export.
     load_dotenv()
 
@@ -240,8 +265,8 @@ def main(argv: list[str] | None = None) -> None:
         assert isinstance(llm, GeminiChat)
         _startup_gemini(llm)
 
-        # Spec del loop: None = default specialista FS (test e banner invariati).
-        loop_spec: LoopSpec | None = None
+        # Spec sempre esplicito: il default del motore è lazy, qui si vede il ramo.
+        loop_spec: LoopSpec
         workspace_root: Path | None = None
         if agent == "gmail":
             # Niente ensure_workspace né sync RAG: solo gate sul token a disco.
@@ -251,8 +276,15 @@ def main(argv: list[str] | None = None) -> None:
             # Come Gmail: nessun file utente, nessun indice, solo la chiave API.
             _require_tavily_key(settings)
             loop_spec = WEB_LOOP_SPEC
+        elif agent == "fs":
+            # Ex default: Desktop + indice, catalogo create/append/read/find.
+            workspace_root = _prepare_workspace()
+            loop_spec = FS_LOOP_SPEC
         else:
-            workspace_root = _prepare_master_workspace()
+            # Router: stesso Desktop/RAG di fs (serve ask_fs). Niente fail-fast
+            # Gmail/Tavily: i gate sono lazy nel dispatch ask_gmail / ask_web.
+            workspace_root = _prepare_workspace()
+            loop_spec = MASTER_LOOP_SPEC
 
         stt, tts = create_audio_pair(settings)
 

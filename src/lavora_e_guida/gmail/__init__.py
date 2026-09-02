@@ -1,7 +1,8 @@
 """Client Gmail: OAuth a tavolino, lettura e invio con HITL.
 
-L'agente master (FS/RAG) non deve importare questo pacchetto: i tool email
-restano nello specialista Gmail.
+Pacchetto dello specialista `--agent gmail` (e del nested `ask_gmail` del
+router). Lo specialista FS (`--agent fs`) non deve importare da qui: i tool
+email restano nello specialista Gmail.
 """
 
 from lavora_e_guida.gmail.oauth import (
