@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Helper STT solo Windows: WinRT SpeechRecognizer esige STA + message pump.
+    TFM windows10.0.19041 = proiezione CsWinRT di Windows.Media.SpeechRecognition
+    senza pacchetti extra. Non si compila da WSL: serve SDK .NET 8 su Windows.
+  -->
+  <PropertyGroup>
+    <!-- WinExe: niente console. La form nascosta tiene vivo Application.Run. -->
+    <OutputType>WinExe</OutputType>
+    <!-- 19041: SpeechRecognizer + ContinuousRecognitionSession stabili su Win10 2004+. -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <!-- MinVersion allineata al TFM: niente fallback a Win10 più vecchi senza le API usate. -->
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <!-- WinForms dà lo STA pump (Application.Run) senza WPF. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- App non-packaged: il manifest classico basta per asInvoker e compatibility. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RootNamespace>SttHelper</RootNamespace>
+    <AssemblyName>stt_helper</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <!-- Prodotto di studio: PDB sempre, anche in Release, per inseguire RPC_E_WRONG_THREAD. -->
+    <DebugType>portable</DebugType>
+    <Description>Helper STT WinRT (wake list + dettatura continua, loopback :8766) per lavora_e_guida.</Description>
+  </PropertyGroup>
+</Project>

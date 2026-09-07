@@ -42,6 +42,10 @@ Connessione Gmail (OAuth Desktop a tavolino, non nel loop vocale): [docs/gmail_o
 
 Ricerca web (chiave Tavily, tool `web_search`, costo in crediti): [docs/tavily_web.md](docs/tavily_web.md).
 
+Host audio Windows (WinRT STT + edge-tts, `AUDIO_DRIVER=http`): [docs/audio_host.md](docs/audio_host.md). Avvio con `python.exe` su Windows (`windows_audio/server.py`); da WSL solo il client HTTP.
+
+Mappe Mermaid del runtime (avvio, loop, master, audio, Gmail, RAG): [docs/flowchart.md](docs/flowchart.md).
+
 ## Test
 
 ```bash

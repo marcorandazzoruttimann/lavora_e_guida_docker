@@ -2,6 +2,8 @@
 
 Collega l’assistente vocale a [Tavily](https://tavily.com), un motore di ricerca pensato per gli LLM: restituisce titolo, URL e uno snippet già estratto, non una pagina HTML da ripulire.
 
+Flowchart dello specialista e del nested `ask_web`: [flowchart_master.md](flowchart_master.md).
+
 | Agente | Comando | Ruolo rispetto a Tavily |
 | --- | --- | --- |
 | master (default) | `lavora-e-guida` | Router: `ask_web` smista qui. La chiave si chiede al primo `ask_web`, non all’avvio |

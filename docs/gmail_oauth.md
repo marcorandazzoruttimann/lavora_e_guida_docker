@@ -2,6 +2,8 @@
 
 Collega un account Gmail personale (`GMAIL_USER`) alla Gmail API REST. Il consenso OAuth è un’operazione **da scrivania, una tantum**: non parte dal loop vocale `lavora-e-guida` e non è un tool Gemini.
 
+Flowchart OAuth e HITL invio: [flowchart_gmail.md](flowchart_gmail.md).
+
 Il loop Gmail (`--agent gmail`) gira su **Gemini** con function calling nativo (`functionDeclarations` + `functionCall` / `parts[].text`), come gli altri tre agenti (router master, specialista FS, specialista web). Qwen 2.5 3B è extra di studio: `--llm ollama` sul loop vocale è fail-fast parlante.
 
 | Agente | Comando | Ruolo rispetto a Gmail |

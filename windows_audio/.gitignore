@@ -1,0 +1,13 @@
+# Artefatti MSBuild dell'helper C# (dotnet run / publish).
+# Lo spawn Python cerca stt_helper.exe sotto stt_helper/bin/; non va in git.
+bin/
+obj/
+
+# Venv Python *host Windows* (edge-tts, pygame). Distinto da .venv WSL del repo.
+.venv/
+venv/
+env/
+
+# Log di spawn se qualcuno li redirige nella cartella (il default è %TEMP%).
+*.log
+

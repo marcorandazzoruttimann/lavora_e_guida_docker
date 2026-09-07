@@ -1,0 +1,20 @@
+# Venv *host Windows*, non il progetto WSL.
+# Non aggiungere queste dipendenze a pyproject.toml: l'orchestratore
+# non deve importare pygame né parlare con edge-tts in prima persona.
+#
+# Avvio tipico (PowerShell su Windows, cartella windows_audio/):
+#   py -3.12 -m venv .venv
+#   .\.venv\Scripts\pip install -r requirements.txt
+#   .\.venv\Scripts\python server.py
+
+# Sintesi neurale Microsoft (rete). Voce di prodotto: it-IT-ElsaNeural.
+edge-tts>=6.1.1
+# Playback locale MP3 fino alla fine: tiene il mutex half-duplex.
+# Il wheel Windows porta SDL_mixer; non serve un'installazione SDL a parte.
+pygame>=2.5.0
+# Dettatura italiana dopo la wake WinRT (topic cloud UserCanceled sul helper Win32).
+vosk>=0.3.45
+sounddevice>=0.4.6
+numpy>=1.26.0
+# Durata MP3 per il playback; se manca si stima dal bitrate.
+mutagen>=1.47.0

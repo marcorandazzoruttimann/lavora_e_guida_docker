@@ -48,6 +48,26 @@ def test_settings_fs_and_gemini_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.telemetry_db == settings.index_root / "telemetry.db"
 
 
+def test_audio_timeout_defaults_split_listen_and_speak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listen 300s (wake+dettatura), speak 120s; non un tetto unico da 60s."""
+    monkeypatch.delenv("AUDIO_LISTEN_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("AUDIO_SPEAK_TIMEOUT_SEC", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.audio_listen_timeout_sec == 300.0
+    assert settings.audio_speak_timeout_sec == 120.0
+
+
+def test_env_overrides_audio_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AUDIO_LISTEN_TIMEOUT_SEC / AUDIO_SPEAK_TIMEOUT_SEC vincono sui default."""
+    monkeypatch.setenv("AUDIO_LISTEN_TIMEOUT_SEC", "420")
+    monkeypatch.setenv("AUDIO_SPEAK_TIMEOUT_SEC", "90")
+    settings = Settings(_env_file=None)
+    assert settings.audio_listen_timeout_sec == 420.0
+    assert settings.audio_speak_timeout_sec == 90.0
+
+
 def test_module_aliases_match_settings_singleton() -> None:
     """I tool importano gli alias: devono coincidere col singleton all'import."""
     cfg = get_settings()

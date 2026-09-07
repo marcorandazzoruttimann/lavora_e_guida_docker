@@ -11,7 +11,14 @@ import pytest
 
 from lavora_e_guida.agent import LoopSpec, run_chat_loop
 from lavora_e_guida.audio.factory import create_audio_pair, create_stt, create_tts
-from lavora_e_guida.audio.http_bridge import HttpBridgeSTT, HttpBridgeTTS
+from lavora_e_guida.audio.http_bridge import (
+    CONNECT_TIMEOUT_SEC,
+    DEFAULT_LISTEN_TIMEOUT_SEC,
+    DEFAULT_SPEAK_TIMEOUT_SEC,
+    HttpBridgeSTT,
+    HttpBridgeTTS,
+    audio_http_timeout,
+)
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
 from lavora_e_guida.config import Settings
 from lavora_e_guida.fs.agent import FS_LOOP_SPEC
@@ -272,5 +279,53 @@ def test_factory_respects_audio_driver_http() -> None:
         assert settings.audio_bridge_url == "http://10.0.0.5:8765"
     finally:
         # Evitiamo socket aperti residui nei worker pytest.
+        stt.close()
+        tts.close()
+
+
+def test_audio_http_timeout_keeps_connect_short() -> None:
+    """Connect 5s indipendente dal read: host spento non eredita i minuti STT."""
+    timeout = audio_http_timeout(300.0)
+    assert timeout.connect == CONNECT_TIMEOUT_SEC
+    assert timeout.read == 300.0
+    assert timeout.write == 300.0
+
+
+def test_http_bridge_default_timeouts_are_split() -> None:
+    """Senza Settings: STT 300s di read, TTS 120s; connect 5s su entrambi."""
+    stt = HttpBridgeSTT("http://example.test:8765")
+    tts = HttpBridgeTTS("http://example.test:8765")
+    try:
+        assert stt._client.timeout.read == DEFAULT_LISTEN_TIMEOUT_SEC
+        assert stt._client.timeout.connect == CONNECT_TIMEOUT_SEC
+        assert tts._client.timeout.read == DEFAULT_SPEAK_TIMEOUT_SEC
+        assert tts._client.timeout.connect == CONNECT_TIMEOUT_SEC
+        # Non devono più condividere il vecchio tetto unico da 60s.
+        assert stt._client.timeout.read != tts._client.timeout.read
+    finally:
+        stt.close()
+        tts.close()
+
+
+def test_factory_http_passes_listen_and_speak_timeouts() -> None:
+    """Factory inoltra AUDIO_*_TIMEOUT_SEC nel client httpx, connect fisso."""
+    settings = Settings(
+        audio_driver="http",
+        windows_host="10.0.0.5",
+        windows_audio_port=8765,
+        audio_listen_timeout_sec=420.0,
+        audio_speak_timeout_sec=90.0,
+        _env_file=None,
+    )
+    stt = create_stt(settings)
+    tts = create_tts(settings)
+    try:
+        assert isinstance(stt, HttpBridgeSTT)
+        assert isinstance(tts, HttpBridgeTTS)
+        assert stt._client.timeout.read == 420.0
+        assert stt._client.timeout.connect == CONNECT_TIMEOUT_SEC
+        assert tts._client.timeout.read == 90.0
+        assert tts._client.timeout.connect == CONNECT_TIMEOUT_SEC
+    finally:
         stt.close()
         tts.close()

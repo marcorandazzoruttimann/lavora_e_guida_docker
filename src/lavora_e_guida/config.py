@@ -73,6 +73,14 @@ class Settings(BaseSettings):
         description="Override for Windows host IP; empty/None → resolv.conf discovery",
     )
     windows_audio_port: int = 8765
+    # Client WSL → host Windows: POST /listen può restare aperto su wake + dettatura
+    # (l'helper C# non chiude su transcript vuoto). 60s era il tetto unico e
+    # scadeva mentre l'utente non aveva ancora detto la wake di apertura.
+    # Connect resta 5s nel bridge HTTP: se la porta è chiusa non aspettiamo i 300s.
+    audio_listen_timeout_sec: float = Field(default=300.0, gt=0)
+    # POST /speak copre sintesi edge-tts + playback locale fino alla fine.
+    # Più corto del listen: una reply parlata lunga sta in un paio di minuti.
+    audio_speak_timeout_sec: float = Field(default=120.0, gt=0)
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
     # Cloud: `--llm gemini` (override CLI `--model` o env GEMINI_MODEL).

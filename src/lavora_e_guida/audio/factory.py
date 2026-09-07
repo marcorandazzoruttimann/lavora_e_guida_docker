@@ -6,7 +6,11 @@ Import lazy non serve qui: Mock e httpx sono dipendenze leggere sempre presenti.
 
 from __future__ import annotations
 
-from lavora_e_guida.audio.http_bridge import HttpBridgeSTT, HttpBridgeTTS
+from lavora_e_guida.audio.http_bridge import (
+    HttpBridgeSTT,
+    HttpBridgeTTS,
+    audio_http_timeout,
+)
 from lavora_e_guida.audio.interface import BaseSTT, BaseTTS
 from lavora_e_guida.audio.mock import MockSTT, MockTTS
 from lavora_e_guida.config import Settings, get_settings
@@ -20,7 +24,11 @@ def create_stt(settings: Settings | None = None) -> BaseSTT:
         return MockSTT()
     if cfg.audio_driver == "http":
         # URL già risolto (nameserver WSL o WINDOWS_HOST).
-        return HttpBridgeSTT(cfg.audio_bridge_url)
+        # Timeout da Settings: AUDIO_LISTEN_TIMEOUT_SEC, connect fisso a 5s.
+        return HttpBridgeSTT(
+            cfg.audio_bridge_url,
+            timeout=audio_http_timeout(cfg.audio_listen_timeout_sec),
+        )
     raise ValueError(f"AUDIO_DRIVER non supportato: {cfg.audio_driver!r}")
 
 
@@ -30,7 +38,11 @@ def create_tts(settings: Settings | None = None) -> BaseTTS:
     if cfg.audio_driver == "mock":
         return MockTTS()
     if cfg.audio_driver == "http":
-        return HttpBridgeTTS(cfg.audio_bridge_url)
+        # Speak più corto del listen: sintesi + playback, non attesa wake.
+        return HttpBridgeTTS(
+            cfg.audio_bridge_url,
+            timeout=audio_http_timeout(cfg.audio_speak_timeout_sec),
+        )
     raise ValueError(f"AUDIO_DRIVER non supportato: {cfg.audio_driver!r}")
 
 
