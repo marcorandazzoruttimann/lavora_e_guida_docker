@@ -18,6 +18,12 @@ lavora-e-guida
 
 Equivalente: `python -m lavora_e_guida`.
 
+## Alternativa Docker (studio)
+
+Il quick start sopra resta il default. Docker è un secondo percorso didattico: **un** container orchestratore, audio **mock** di default (Compose + codice; niente `.env` nel repo). Chi clona copia `.env.example` → `.env`, mette `GEMINI_API_KEY`, decommenta `HOST_WORKSPACE` sul Desktop, poi `docker compose run --rm app`.
+
+Hands-free (`AUDIO_DRIVER=http` nel `.env` locale) e OAuth Gmail restano **fuori** dal container: host `windows_audio/server.py` su Windows, consenso `lavora-e-guida-gmail-auth` in WSL. Sequenza D0–D10: [docs/docker.md](docs/docker.md).
+
 | Agente | Comando | Cosa fa |
 | --- | --- | --- |
 | master (default) | `lavora-e-guida` | Router: smista a FS, Gmail o web. Workspace + RAG all’avvio; Gmail e Tavily si chiedono al primo `ask_*` |
@@ -43,6 +49,8 @@ Connessione Gmail (OAuth Desktop a tavolino, non nel loop vocale): [docs/gmail_o
 Ricerca web (chiave Tavily, tool `web_search`, costo in crediti): [docs/tavily_web.md](docs/tavily_web.md).
 
 Host audio Windows (WinRT STT + edge-tts, `AUDIO_DRIVER=http`): [docs/audio_host.md](docs/audio_host.md). Avvio con `python.exe` su Windows (`windows_audio/server.py`); da WSL solo il client HTTP.
+
+Orchestratore in Docker (studio, un container, audio mock): [docs/docker.md](docs/docker.md). OAuth e host audio restano fuori dal container.
 
 Mappe Mermaid del runtime (avvio, loop, master, audio, Gmail, RAG): [docs/flowchart.md](docs/flowchart.md).
 

@@ -1,0 +1,72 @@
+# Orchestratore vocale in un *solo* servizio. Non c'è un secondo container
+# STT/TTS: l'audio hands-free resta `windows_audio/server.py` su Windows,
+# raggiunto in HTTP se (e solo se) il `.env` *locale* passa ad
+# AUDIO_DRIVER=http. Questo file committato resta sul default mock.
+#
+# Analogia didattica (docs/docker.md, glossario):
+# - immagine = ricetta congelata (Dockerfile / `docker compose build`);
+# - container = processo vivo (`docker compose run --rm app`);
+# - volume = cartella host montata (Desktop → /workspace, runtime → /index);
+# - env_file = chiavi a *avvio*, mai bake nell'immagine;
+# - host.docker.internal = DNS verso l'host Windows/WSL, per :8765.
+#
+# Compose legge *due volte* il `.env` del progetto, con ruoli diversi:
+# 1) interpolazione `${...}` in *questo* YAML (AUDIO_DRIVER, HOST_WORKSPACE);
+# 2) `env_file` inietta le stesse chiavi *dentro* il container (Gemini, ecc.).
+# Il blocco `environment` vince su `env_file`: così i path Linux del
+# container non restano quelli WSL/Desktop scritti nel `.env` del venv.
+
+services:
+  # Unico processo: CLI `lavora-e-guida` (ENTRYPOINT dell'immagine).
+  # `docker compose run --rm app --agent fs` accoda gli argomenti.
+  # Niente `docker compose` di `windows_audio`: quello gira nativo su Windows.
+  app:
+    # Costruisce dal Dockerfile della directory del compose (context `.`).
+    # I secret non entrano: `.dockerignore` + nessuna COPY di `.env`.
+    build: .
+
+    # Chiavi API e override locali. Se il file manca, Compose si ferma:
+    # copiare `.env.example` → `.env` e riempire almeno GEMINI_API_KEY.
+    # Questo *non* cuoce il `.env` nell'immagine: è solo env a runtime.
+    env_file: .env
+
+    # Override obbligatori *dentro* Linux: i default di config.py
+    # (`/mnt/c/Users/User/Desktop/Ollama_test`) nel container non esistono.
+    # Non duplicare queste tre chiavi nel `.env` usato dal venv WSL.
+    environment:
+      # Volume Desktop montato sotto: note, inbox, allegati.
+      WORKSPACE_ROOT: /workspace
+      # Volume `./runtime` montato sotto: Chroma, SQLite, token Gmail.
+      INDEX_ROOT: /index
+      # Default mock (tastiera/stdout) per chi clona senza toccare l'audio.
+      # Interpolazione dal `.env` del progetto o dall'ambiente della shell;
+      # se la chiave manca, `-mock`. Hands-free: AUDIO_DRIVER=http *solo*
+      # nel `.env` locale, mai una riga `http` scritta qui sotto.
+      AUDIO_DRIVER: ${AUDIO_DRIVER:-mock}
+
+    # Equivalente di `docker run -it`: il driver mock legge stdin (una
+    # frase + Invio) e scrive su stdout. Senza TTY `esci` e il prompt
+    # CLI non funzionano. `run` alloca già un TTY; restano qui per `up`
+    # e per documentare il contratto del mock.
+    stdin_open: true
+    tty: true
+
+    # Disco del container = usa e getta; i dati vivi stanno sull'host.
+    # HOST_WORKSPACE lo interpola Compose dal `.env` locale (riga da
+    # decommentare, es. /mnt/c/Users/User/Desktop/Ollama_test).
+    # Senza valore il mount è `:/workspace` e Docker fallisce in modo
+    # visibile: meglio che scrivere sul volume sbagliato in silenzio.
+    volumes:
+      - ${HOST_WORKSPACE}:/workspace
+      # Indice RAG e token già ottenuti *fuori* dal container
+      # (`lavora-e-guida-gmail-auth` in WSL). OAuth nel container
+      # romperebbe il redirect 127.0.0.1 ≠ browser Windows.
+      - ./runtime:/index
+
+    # WSL2 / engine Linux: `host.docker.internal` non c'è di default.
+    # `host-gateway` = IP dell'host visto dal bridge Docker. Serve quando
+    # il `.env` locale ha WINDOWS_HOST=host.docker.internal (hands-free).
+    # La discovery da /etc/resolv.conf nel container punta a 127.0.0.11
+    # (DNS interno), *non* all'IP Windows: non lasciare WINDOWS_HOST vuoto.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

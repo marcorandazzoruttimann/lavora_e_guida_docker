@@ -4,8 +4,18 @@ venv/
 env/
 
 # Local secrets / env
+# `.env` è il file con le chiavi vere (Gemini, Tavily, Gmail): non va mai in git.
 .env
-.env.local
+# Varianti locali (`.env.docker`, `.env.local`, `.env.wsl`, …) contengono
+# lo stesso tipo di secret o path Desktop: le ignoriamo tutte.
+.env.*
+# `.env.example` è il template committabile (chiavi vuote / placeholder).
+# Senza questa eccezione, `.env.*` lo escluderebbe dal repo.
+!.env.example
+
+# Override Compose locale: path Desktop, porte, bind mount specifici della
+# macchina. Il file base `docker-compose.yml` resta tracciato.
+docker-compose.override.yml
 
 # Python
 __pycache__/
@@ -39,11 +49,12 @@ Thumbs.db
 *.log
 logs/
 
-# Stato locale generato (cartella tracciata via .gitkeep): RAG, telemetria, token
-runtime/files.db
-runtime/telemetry.db
-runtime/chroma/
-runtime/gmail_token.json
+# Stato locale generato (cartella tracciata via .gitkeep): RAG, telemetria,
+# token Gmail, SQLite, Chroma. Ignoriamo *tutto* il contenuto così un file
+# nuovo (es. un altro DB) non finisce in git per sbaglio.
+runtime/*
+# Eccezione: `.gitkeep` tiene la cartella nel repo anche se è vuota.
+!runtime/.gitkeep
 # Residuo del vecchio nome cartella (pre-rename ollama_lab → runtime)
 ollama_lab/files.db
 ollama_lab/telemetry.db

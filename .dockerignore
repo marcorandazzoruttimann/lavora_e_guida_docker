@@ -1,0 +1,36 @@
+# Il Dockerignore NON sostituisce il gitignore: uno protegge `git add`,
+# l'altro protegge i layer dell'immagine (il context inviato a `docker build`).
+#
+# `docs/` RESTA nel context di build. Due cose diverse:
+# - chi clona da GitHub prende `docs/` dal git, non dall'immagine;
+# - l'immagine comunque non conterrà `docs/`: il Dockerfile copia solo
+#   `pyproject.toml`, `README.md` e `src/`.
+# Ignorare `docs/` avrebbe accorciato solo l'invio del context al daemon,
+# non ciò che finisce nel layer. I manuali sono pubblici (placeholder
+# `account@gmail.com`, `tvly-...`, cartella esempio): nessun dato personale.
+# Non c'è un motivo di sicurezza per toglierli; li lasciamo.
+
+# Secret e env locali: mai nel context, mai in un layer. Chiavi vere stanno
+# solo sul `.env` dell'host, iniettato a runtime con `env_file` / `--env-file`.
+.env
+.env.*
+!.env.example
+
+# Override Compose locale (path Desktop, bind mount della macchina): non
+# serve all'immagine e potrebbe contenere path personali.
+docker-compose.override.yml
+
+# Virtualenv WSL e host Windows: binari inutili e pesanti nel context.
+.venv/
+windows_audio/.venv/
+
+# Stato runtime: token Gmail, Chroma, SQLite. Si monta a runtime come volume
+# (`./runtime:/index`), non si copia nel layer.
+runtime/
+
+# Token e credenziali OAuth ovunque stiano (anche fuori da runtime/).
+**/gmail_token.json
+**/client_secret*.json
+
+# Storia git: non serve all'immagine e allunga il context.
+.git/
