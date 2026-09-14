@@ -1,5 +1,7 @@
 # Lavora e Guida
 
+Questo snapshot è il ramo Docker/WSL pubblicato come `lavora_e_guida_docker`.
+
 Ecosistema agentico vocale hands-free: orchestratore in WSL2, I/O audio sul Windows host.
 
 Loop attuale: Mock/HTTP STT → Gemini (function calling nativo: `functionDeclarations` + `functionCall` / `parts[].text`) → router master (`ask_fs` / `ask_gmail` / `ask_web`) → specialista nested → TTS.
