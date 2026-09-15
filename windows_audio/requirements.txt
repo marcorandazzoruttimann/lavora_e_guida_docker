@@ -1,6 +1,12 @@
-# Venv *host Windows*, non il progetto WSL.
+# Venv *host Windows* (python.exe Win32), non il progetto WSL.
+# Elenco e tabella: README.md «Ambienti: WSL2 vs Host Windows».
 # Non aggiungere queste dipendenze a pyproject.toml: l'orchestratore
 # non deve importare pygame né parlare con edge-tts in prima persona.
+#
+# Fuori da questo file (non sono pip): SDK .NET 8 per stt_helper,
+# pacchetto lingua it-IT + FOD Speech, microfono; se le DLL native
+# di vosk/pygame non caricano, VC++ Redistributable x64.
+# Dettaglio operativo: docs/audio_host.md
 #
 # Avvio tipico (PowerShell su Windows, cartella windows_audio/):
 #   py -3.12 -m venv .venv
