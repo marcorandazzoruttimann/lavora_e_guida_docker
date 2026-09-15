@@ -4,6 +4,17 @@ Ecosistema agentico vocale hands-free: orchestratore in WSL2, I/O audio sul Wind
 
 Loop attuale: Mock/HTTP STT → Gemini (function calling nativo: `functionDeclarations` + `functionCall` / `parts[].text`) → router master (`ask_fs` / `ask_gmail` / `ask_web`) → specialista nested → TTS.
 
+```mermaid
+flowchart LR
+  STT["STT<br/>mock o host Windows"] -->|"transcript"| LOOP["Loop WSL"]
+  LOOP --> GEM["Gemini"]
+  GEM -->|"ask_fs / ask_gmail / ask_web"| SPEC["Specialista<br/>fs, gmail o web"]
+  SPEC --> LOOP
+  LOOP -->|"testo parlato"| TTS["TTS host<br/>edge-tts"]
+```
+
+Con `AUDIO_DRIVER=mock` lo STT è la tastiera e il TTS è la console. Mappe complete: [docs/flowchart.md](docs/flowchart.md).
+
 Qwen 2.5 3B (Ollama) è extra di studio: `--llm ollama` sul loop vocale è fail-fast parlante. Il modulo `local_ollama.py` può restare per prove isolate.
 
 ## Prerequisiti di sistema
