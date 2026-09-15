@@ -2,6 +2,22 @@
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
+# ---------------------------------------------------------------------------
+# Questo file è l'ambiente WSL2 (orchestratore).
+#
+#   source .venv/bin/activate
+#   pip install -e ".[dev]"
+#
+# Microfono, altoparlanti, WinRT e TTS vivono sull'host Windows, in un altro
+# Python (py -3.12) e un altro venv. Elenco e avvio:
+#   windows_audio/requirements.txt
+#   docs/audio_host.md
+#
+# Non mettere qui edge-tts, pygame, vosk, sounddevice, numpy, mutagen: i wheel
+# Linux non sostituiscono python.exe Win32, e il loop WSL parla solo HTTP
+# (http_bridge) verso :8765. Gemini è REST via httpx, senza SDK ufficiale.
+# ---------------------------------------------------------------------------
+
 [project]
 name = "lavora_e_guida"
 version = "0.1.0"
@@ -9,20 +25,21 @@ description = "Ecosistema agentico vocale hands-free (WSL orchestrator + Windows
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "httpx>=0.27",
-    "pydantic>=2",
-    "pydantic-settings>=2",
-    "python-dotenv>=1",
-    "rich>=13",
-    "pypdf>=4",
-    "rapidfuzz>=3",
-    "chromadb>=0.5",
-    "google-auth>=2",
-    "google-auth-oauthlib>=1",
-    "tavily-python>=0.8",
+    "httpx>=0.27",                 # Gemini generateContent, POST /listen|/speak, Gmail REST
+    "pydantic>=2",                 # modelli e validazione
+    "pydantic-settings>=2",        # Settings da env / .env
+    "python-dotenv>=1",            # carico .env all'avvio CLI
+    "rich>=13",                    # output console (loop mock)
+    "pypdf>=4",                    # testo dai PDF del workspace
+    "rapidfuzz>=3",                # risoluzione nomi file / mittenti
+    "chromadb>=0.5",               # RAG: collection unica sotto INDEX_ROOT
+    "google-auth>=2",              # token Gmail già collegato
+    "google-auth-oauthlib>=1",     # flusso Desktop a tavolino (auth_cli)
+    "tavily-python>=0.8",          # ricerca web (agente web)
 ]
 
 [project.optional-dependencies]
+# Extra WSL: test e lint. Non copre l'host audio (pytest del package mocka HTTP).
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
