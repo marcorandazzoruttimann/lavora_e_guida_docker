@@ -6,9 +6,47 @@ Loop attuale: Mock/HTTP STT → Gemini (function calling nativo: `functionDeclar
 
 Qwen 2.5 3B (Ollama) è extra di studio: `--llm ollama` sul loop vocale è fail-fast parlante. Il modulo `local_ollama.py` può restare per prove isolate.
 
+## Prerequisiti di sistema
+
+Prima dei venv. Python richiesto: **3.12 o superiore** (`requires-python` in [`pyproject.toml`](pyproject.toml), ruff `py312`). **3.10 e 3.11 non bastano.**
+
+### WSL2
+
+- **WSL2** (non WSL1), distro Debian/Ubuntu. Su Ubuntu 24.04 `python3` è già 3.12; su 22.04 installare 3.12 (es. deadsnakes) prima del venv.
+- Pacchetti APT per il loop di prodotto (Gemini, RAG, Gmail, client HTTP audio):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3.12 python3.12-venv python3-pip libgomp1
+```
+
+`python3.12-venv` abilita `python3.12 -m venv`. `libgomp1` è il runtime OpenMP di ONNX dentro Chroma: senza, il RAG può fallire all’import con `libgomp.so.1` mancante.
+
+Opzionale: `zstd` solo se si installa Ollama in WSL ([docs/ollama.md](docs/ollama.md)). `build-essential` e `python3.12-dev` solo se pip ricompila un wheel (con 3.12 e Ubuntu recente di solito non servono).
+
+- Rete in uscita verso Gemini (e Tavily/Gmail se usati). `GEMINI_API_KEY` nel `.env` WSL.
+- Workspace file sul Desktop Windows, visibile in WSL sotto `/mnt/c/...`.
+- Per il consenso Gmail dal browser Windows: networking **mirrored** (o port forward); dettaglio [docs/gmail_oauth.md](docs/gmail_oauth.md).
+
+### Host Windows (solo `AUDIO_DRIVER=http`)
+
+WinRT **non** è un pacchetto pip: la wake è l’helper C# (`stt_helper`, `:8766`). Il `python.exe` host fa TTS, playback e dettatura Vosk. Nessun `winrt` / `winsdk` nel venv.
+
+- Windows **10 2004+** o Windows 11 (API `SpeechRecognizer` / `ContinuousRecognitionSession`).
+- Python **3.12+ a 64 bit** per Windows, distinto dal Python WSL. Installer python.org o Store; avvio con il launcher `py -3.12`. Pacchetti pip: sezione [Ambienti](#ambienti-wsl2-vs-host-windows) / [`windows_audio/requirements.txt`](windows_audio/requirements.txt).
+- **SDK .NET 8** (workload desktop) se manca già `stt_helper.exe` compilato. Non si compila da WSL. [Download](https://dotnet.microsoft.com/download/dotnet/8.0).
+- Pacchetto lingua **Italiano** e FOD Speech (`Language.Speech~~~it-IT`) per la wake list WinRT. La dettatura è Vosk (locale): il riconoscitore vocale *online* di Windows non serve.
+- Microfono predefinito; Impostazioni → Privacy e sicurezza → Microfono → accesso alle **app desktop**.
+- Rete HTTPS verso i server Microsoft (`edge-tts`, voce `it-IT-ElsaNeural`). Altoparlante/cuffie predefiniti per pygame.
+- Se `vosk` o `pygame` non caricano le DLL native: [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) x64.
+- Clone su disco `C:\`, non solo `\\wsl$\` (I/O lento; `dotnet` e pygame ci inciampano).
+- Firewall: al primo bind Windows può chiedere di consentire Python in rete privata (porta **8765** verso WSL). La 8766 resta loopback.
+
+Troubleshooting: [docs/audio_host.md](docs/audio_host.md).
+
 ## Ambienti: WSL2 vs Host Windows
 
-Due Python, due venv. Non mescolare e non fare `pip install -e .` dal `python.exe` Windows (né il contrario).
+Due Python, due venv. Non mescolare e non fare `pip install -e .` dal `python.exe` Windows (né il contrario). Interprete, APT e WinRT: [Prerequisiti di sistema](#prerequisiti-di-sistema).
 
 | Dove | File dipendenze | Cosa installa |
 | --- | --- | --- |
@@ -17,7 +55,7 @@ Due Python, due venv. Non mescolare e non fare `pip install -e .` dal `python.ex
 
 ### WSL2
 
-Python 3.12+ in un venv Linux. Dalla root del repo:
+Dopo i prerequisiti APT, dalla root del repo:
 
 ```bash
 python3.12 -m venv .venv
@@ -43,7 +81,7 @@ Chiavi in `.env` lato WSL: almeno `GEMINI_API_KEY`. Gmail e Tavily al primo `ask
 
 ### Host Windows (`windows_audio`)
 
-Serve solo per il loop vocale reale (`AUDIO_DRIVER=http`). Si esegue con **Python Windows** (`py -3.12`), da un clone su disco `C:\` (non `\\wsl$\`). Procedura completa: [docs/audio_host.md](docs/audio_host.md).
+Serve solo per il loop vocale reale (`AUDIO_DRIVER=http`). Si esegue con **Python Windows** (`py -3.12`), da un clone su disco `C:\` (non `\\wsl$\`). WinRT, .NET e microfono: [Prerequisiti di sistema](#prerequisiti-di-sistema). Procedura completa: [docs/audio_host.md](docs/audio_host.md).
 
 Pacchetti Python (venv **Win32**, cartella `windows_audio/`):
 
@@ -62,13 +100,6 @@ py -3.12 -m venv .venv
 | `sounddevice` | Mic WASAPI verso Vosk. Il wheel Windows porta di solito PortAudio |
 | `numpy` | Buffer audio per Vosk |
 | `mutagen` | Durata MP3; se manca si stima dal bitrate |
-
-Fuori da pip (una volta, a mano):
-
-- **SDK .NET 8** (workload desktop) se non c’è già `stt_helper.exe` compilato: l’helper C# fa la wake WinRT su `:8766`. Non si compila da WSL.
-- **Pacchetto lingua Italiano** e FOD Speech (`Language.Speech~~~it-IT`) per la wake list WinRT.
-- Microfono predefinito e privacy «app desktop» accesa.
-- Se `vosk` o `pygame` non caricano le DLL native: [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) recente (x64).
 
 Al primo ascolto Vosk scarica da solo `vosk-model-small-it-0.22` (~50 MB) in `%LOCALAPPDATA%\lavora_e_guida\`. WSL non deve lanciare `server.py` (fail-fast, codice 2).
 
@@ -110,7 +141,7 @@ Connessione Gmail (OAuth Desktop a tavolino, non nel loop vocale): [docs/gmail_o
 
 Ricerca web (chiave Tavily, tool `web_search`, costo in crediti): [docs/tavily_web.md](docs/tavily_web.md).
 
-Host audio Windows (install, rete, troubleshooting): [docs/audio_host.md](docs/audio_host.md). Dipendenze Host vs WSL: sezione [Ambienti](#ambienti-wsl2-vs-host-windows) qui sopra.
+Host audio Windows (install, rete, troubleshooting): [docs/audio_host.md](docs/audio_host.md). OS: [Prerequisiti](#prerequisiti-di-sistema). Pacchetti pip Host vs WSL: [Ambienti](#ambienti-wsl2-vs-host-windows).
 
 Mappe Mermaid del runtime (avvio, loop, master, audio, Gmail, RAG): [docs/flowchart.md](docs/flowchart.md).
 
